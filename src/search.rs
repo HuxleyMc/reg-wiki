@@ -19,6 +19,10 @@ const STOPWORDS: &[&str] = &[
     "we", "what", "when", "where", "which", "who", "why", "with", "you",
 ];
 
+pub fn is_stopword(w: &str) -> bool {
+    STOPWORDS.contains(&w)
+}
+
 fn words(text: &str, min: usize) -> Vec<String> {
     let mut seen = HashSet::new();
     let all: Vec<String> = text

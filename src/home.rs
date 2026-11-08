@@ -149,6 +149,57 @@ impl Config {
         self.doc.get(section)?.get(key)?.as_integer()
     }
 
+    /// The item at a dotted path, e.g. `["agents", "claude", "command"]`.
+    pub fn get(&self, path: &[&str]) -> Option<&Item> {
+        let mut item = self.doc.as_item();
+        for k in path {
+            item = item.get(k)?;
+        }
+        Some(item)
+    }
+
+    pub fn str_at(&self, path: &[&str]) -> Option<String> {
+        self.get(path)?.as_str().map(str::to_string)
+    }
+
+    pub fn bool_at(&self, path: &[&str]) -> Option<bool> {
+        self.get(path)?.as_bool()
+    }
+
+    /// An array of strings; anything else in it is skipped.
+    pub fn strs_at(&self, path: &[&str]) -> Option<Vec<String>> {
+        let a = self.get(path)?.as_array()?;
+        Some(
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        )
+    }
+
+    /// Set a value at a dotted path, creating tables on the way. Comments and the
+    /// rest of the file are kept.
+    pub fn set_at(&mut self, path: &[&str], v: impl Into<toml_edit::Value>) -> Result<()> {
+        let (last, tables) = path.split_last().context("empty config path")?;
+        let mut t: &mut Table = self.doc.as_table_mut();
+        for k in tables {
+            let item = t.entry(k).or_insert_with(|| {
+                let mut nt = Table::new();
+                // `[agents.claude]` rather than an empty `[agents]` header too.
+                nt.set_implicit(true);
+                Item::Table(nt)
+            });
+            t = item
+                .as_table_mut()
+                .with_context(|| format!("`{k}` in config.toml should be a table"))?;
+        }
+        t[last] = value(v);
+        Ok(())
+    }
+
+    pub fn render(&self) -> String {
+        self.doc.to_string()
+    }
+
     pub fn save(&self) -> Result<()> {
         util::atomic_write(&self.path, self.doc.to_string().as_bytes())
     }

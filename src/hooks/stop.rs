@@ -41,13 +41,19 @@ pub fn run(ctx: &Ctx, input: &Input) -> Result<Option<Output>> {
     if n > files.len() {
         files.push(format!("{} more", n - files.len()));
     }
+    let ai = if crate::librarian::Settings::load(&ctx.cfg).enabled {
+        " Or send rough notes to `reg-wiki ai record` (on stdin) and the librarian will turn \
+         them into page edits."
+    } else {
+        ""
+    };
     Ok(Some(Output::Block(format!(
         "reg-wiki: this session changed {n} file(s) ({}) but recorded nothing in the wiki. \
          If you learned something a later session would want (a decision and its reason, a \
          gotcha, how a part of the code fits together), record it now: update the closest \
          page with `reg-wiki read <slug>` then `reg-wiki write <slug> --base <hash> -m \"why\"`, \
-         or add one with `reg-wiki new`. Search first with `reg-wiki query`. If nothing is \
-         worth keeping, just finish; this won't be asked again in this session.",
+         or add one with `reg-wiki new`. Search first with `reg-wiki query`.{ai} If nothing \
+         is worth keeping, just finish; this won't be asked again in this session.",
         files.join(", ")
     ))))
 }

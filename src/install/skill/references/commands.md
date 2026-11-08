@@ -56,6 +56,24 @@ Validation refuses a write without `title` or `summary`, with a summary over 200
 | `reg-wiki sync` | Bring the index up to date now (every command does this anyway). |
 | `reg-wiki reindex` | Rebuild the index from the files. Usage events are kept. |
 
+## Librarian
+
+An optional agent (set up by `reg-wiki install`, configured under `[librarian]` in `config.toml`) that reads pages for you. reg-wiki ranks and reads the pages and checks and writes whatever the librarian proposes; the librarian only gets text and returns text.
+
+| Command | Does |
+|---|---|
+| `reg-wiki ai query <question…>` | Ranks the pages, sends the best ones (in full, within `budget_tokens`) and the summaries of what they link to, and prints the librarian's answer, its sources (checked to exist) and the parts the wiki doesn't cover. If the librarian is off, fails or times out, prints plain `query` results with a one-line note instead, so you always get something. |
+| `reg-wiki ai record [--dry-run]` | Rough notes on stdin; the librarian turns them into page edits. Each edit is checked like `write` (frontmatter, summary, links) and those that pass are committed together as `librarian (<model>)`; the rest are reported. It can only change pages it was shown in full. |
+| `reg-wiki ai tend [--limit 5] [--dry-run]` | Sends what `lint` finds that needs judgment (broken links, orphans, weak summaries, long pages, likely duplicates) with the pages involved, and applies the fixes the same way. May delete a page it merged into another, only if nothing still links to it. |
+| `reg-wiki ai models` | The models the librarian's agent offers (`*` marks the one in use). |
+
+```sh
+reg-wiki ai record <<'EOF'
+Invoices go out on the 1st, UTC; the cron is in src/billing/schedule.rs.
+Refunds take 5 days because the bank batches them.
+EOF
+```
+
 ## Projects
 
 | Command | Does |
@@ -68,7 +86,7 @@ Validation refuses a write without `title` or `summary`, with a summary over 200
 
 | Command | Does |
 |---|---|
-| `reg-wiki install [--target claude] [--yes] [--no-permissions] [--stop-hook]` | Writes this skill, adds the hooks and `Bash(reg-wiki:*)` to `~/.claude/settings.json`, and adds a section to `~/.claude/CLAUDE.md`. Safe to run again. `--print-config claude` prints it all instead. |
+| `reg-wiki install [--target claude] [--yes] [--no-permissions] [--stop-hook] [--librarian-model M] [--librarian-agent A] [--no-librarian]` | Writes this skill, adds the hooks and `Bash(reg-wiki:*)` to `~/.claude/settings.json`, adds a section to `~/.claude/CLAUDE.md`, and sets up the librarian in `config.toml` (asked interactively, with the models the agent offers; `--yes` uses the defaults without starting it). Safe to run again. `--print-config claude` prints the Claude Code part instead. |
 | `reg-wiki uninstall` | Removes exactly what install added. |
 | `reg-wiki hook <event>` | Run by Claude Code's hooks; not for direct use. |
 

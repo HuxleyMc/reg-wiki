@@ -81,6 +81,12 @@ pub fn run(ctx: &Ctx) -> Result<ExitCode> {
          WHERE e.kind = 'query' AND e.hits = 0 {gap_cond}
          GROUP BY lower(e.query) ORDER BY n DESC, max(e.ts) DESC LIMIT 10"
     ))?;
+    // Parts of questions the librarian found no answer to.
+    let ai_gaps = counts(&format!(
+        "SELECT min(e.query), count(*) n FROM events e
+         WHERE e.kind = 'gap' {gap_cond}
+         GROUP BY lower(e.query) ORDER BY n DESC, max(e.ts) DESC LIMIT 10"
+    ))?;
     let months = counts(&format!(
         "SELECT substr(p.created, 1, 7) m, count(*) FROM {from}
          WHERE p.created IS NOT NULL AND {cond} GROUP BY m ORDER BY m"
@@ -122,7 +128,7 @@ pub fn run(ctx: &Ctx) -> Result<ExitCode> {
             "scope": scope, "pages": t[0], "refs": t[1], "words": t[2], "chars": t[3], "bytes": t[4],
             "links": l[0], "broken_links": l[1], "orphans": orphans, "stale": stale,
             "most_linked": most_linked, "most_read": most_read, "writes_30d": writers,
-            "queries_without_results": gaps, "growth": growth,
+            "queries_without_results": gaps, "librarian_gaps": ai_gaps, "growth": growth,
         }));
         return Ok(ExitCode::SUCCESS);
     }
@@ -144,6 +150,9 @@ pub fn run(ctx: &Ctx) -> Result<ExitCode> {
         format!("{} ({})", c.name, c.count)
     });
     list("searches with no results", &gaps, |c| {
+        format!("\"{}\" ×{}", c.name, c.count)
+    });
+    list("not in the wiki, per the librarian", &ai_gaps, |c| {
         format!("\"{}\" ×{}", c.name, c.count)
     });
     if !growth.is_empty() {

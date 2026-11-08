@@ -1831,3 +1831,483 @@ fn view_writes_a_self_contained_graph_of_the_scope() {
     );
     assert_eq!(all["scope"], Value::Null);
 }
+
+// ---- Milestone 5: the librarian ----
+
+/// A seeded wiki whose librarian is `tests/fake_acp.py`, answering with `replies` in turn.
+struct Lib {
+    env: Env,
+    log: PathBuf,
+    replies: PathBuf,
+}
+
+impl Lib {
+    fn new(replies: &[&str]) -> Lib {
+        Lib::with(seeded(), replies, "")
+    }
+
+    fn with(env: Env, replies: &[&str], extra_config: &str) -> Lib {
+        let dir = env.home.parent().unwrap().to_path_buf();
+        let log = dir.join("acp.log");
+        let replies_path = dir.join("replies.txt");
+        fs::write(&replies_path, replies.join("\n=====\n")).unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_acp.py");
+        let cfg = env.home.join("config.toml");
+        let mut text = fs::read_to_string(&cfg).unwrap();
+        text.push_str(&format!(
+            "\n[librarian]\nagent = \"fake\"\nmodel = \"haiku\"\ntimeout_secs = 5\n{extra_config}\n\
+             [agents.fake]\ncommand = \"python3\"\nargs = [{:?}]\n",
+            script.display().to_string()
+        ));
+        fs::write(&cfg, text).unwrap();
+        Lib {
+            env,
+            log,
+            replies: replies_path,
+        }
+    }
+
+    fn cmd(&self) -> Command {
+        let mut c = self.env.cmd();
+        c.env("FAKE_ACP_LOG", &self.log)
+            .env("FAKE_ACP_REPLIES", &self.replies)
+            .env("CLAUDECODE", "1");
+        c
+    }
+
+    fn json(&self, args: &[&str], stdin: &str) -> Value {
+        let out = self
+            .cmd()
+            .args(args)
+            .arg("--json")
+            .write_stdin(stdin)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    /// Messages the fake agent received.
+    fn received(&self) -> Vec<Value> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn prompts(&self) -> Vec<String> {
+        self.received()
+            .iter()
+            .filter(|m| m["method"] == "session/prompt")
+            .map(|m| {
+                m["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn ai_query_answers_from_ranked_pages_and_checks_sources() {
+    let lib = Lib::new(&[
+        "<answer>\nInvoices go out monthly.\n</answer>\n<sources>\n- myapp/billing — billing\nmyapp/nope\n</sources>\n<gaps>\n- how refunds work\n</gaps>\n<need>\n</need>",
+    ]);
+    let v = lib.json(&["ai", "query", "when", "do", "invoices", "go", "out"], "");
+    assert_eq!(v["answer"], "Invoices go out monthly.");
+    assert_eq!(slugs_of(&v, "sources"), ["myapp/billing"]);
+    assert_eq!(v["unknown_sources"][0], "myapp/nope");
+    assert_eq!(v["gaps"][0], "how refunds work");
+    assert_eq!(
+        v["model"], "claude-haiku-5-5",
+        "`haiku` matched the offered model"
+    );
+    assert_eq!(v["rounds"], 1);
+
+    let msgs = lib.received();
+    // Protocol: no fs or terminal, an empty temp dir as cwd, the recursion guard set,
+    // and the configured model chosen through configOptions.
+    let init = msgs.iter().find(|m| m["method"] == "initialize").unwrap();
+    assert_eq!(init["params"]["clientCapabilities"]["terminal"], false);
+    assert_eq!(
+        init["params"]["clientCapabilities"]["fs"]["readTextFile"],
+        false
+    );
+    let env = msgs.iter().find(|m| m.get("env").is_some()).unwrap();
+    assert_eq!(env["env"]["REG_LIBRARIAN"], "1");
+    assert!(env["env"]["CLAUDECODE"].is_null());
+    let new = msgs.iter().find(|m| m["method"] == "session/new").unwrap();
+    let cwd = new["params"]["cwd"].as_str().unwrap();
+    assert!(
+        cwd.contains("reg-librarian-") && !Path::new(cwd).exists(),
+        "removed afterwards"
+    );
+    let set = msgs
+        .iter()
+        .find(|m| m["method"] == "session/set_config_option")
+        .unwrap();
+    assert_eq!(set["params"]["configId"], "model");
+    assert_eq!(set["params"]["value"], "claude-haiku-5-5");
+
+    // The prompt has the question and the best page in full, refs by summary.
+    let p = &lib.prompts()[0];
+    assert!(p.contains("Question: when do invoices go out"), "{p}");
+    assert!(p.contains("## Billing (myapp/billing)") && p.contains("Invoices go out monthly."));
+    assert!(
+        p.contains("- myapp/billing/stripe — Webhook retries"),
+        "{p}"
+    );
+
+    // Gaps are recorded and show up in stats.
+    let s = lib.env.json(&["stats"]);
+    assert_eq!(s["librarian_gaps"][0]["name"], "how refunds work");
+
+    // Text output.
+    let lib = Lib::with(Env::new(), &[], "");
+    lib.env
+        .write(
+            "billing",
+            &fm(
+                "Billing",
+                "How invoices work and when they are sent.",
+                "",
+                "Monthly.",
+            ),
+        )
+        .success();
+    fs::write(
+        &lib.replies,
+        "<answer>Monthly.</answer><sources>myapp/billing</sources><gaps></gaps><need></need>",
+    )
+    .unwrap();
+    lib.cmd()
+        .args(["ai", "query", "invoices"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Monthly.\n\nSources:\n- myapp/billing — How invoices work",
+        ))
+        .stdout(predicate::str::contains("Not in the wiki").not());
+}
+
+#[test]
+fn ai_query_sends_needed_pages_in_one_follow_up() {
+    let lib = Lib::new(&[
+        "<answer>partial</answer><sources>myapp/billing</sources><gaps></gaps><need>\nmyapp/billing/stripe\nmyapp/billing\n</need>",
+        "<answer>Webhooks are retried.</answer><sources>myapp/billing/stripe</sources><gaps></gaps><need>myapp/auth</need>",
+    ]);
+    let v = lib.json(&["ai", "query", "invoices"], "");
+    assert_eq!(v["answer"], "Webhooks are retried.");
+    assert_eq!(v["rounds"], 2);
+    let prompts = lib.prompts();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "no third round even though it asked again"
+    );
+    assert!(prompts[1].contains("## Stripe webhooks (myapp/billing/stripe)"));
+    assert!(
+        !prompts[1].contains("## Billing (myapp/billing)"),
+        "already shown in full"
+    );
+}
+
+#[test]
+fn ai_query_falls_back_to_search() {
+    // Off: no [librarian] section.
+    let env = seeded();
+    env.cmd()
+        .args(["ai", "query", "invoices"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "myapp/billing — How subscriptions",
+        ))
+        .stderr(predicate::str::contains(
+            "no librarian answer (the librarian is off",
+        ));
+
+    // A reply it can't parse.
+    let lib = Lib::new(&["I think it's monthly?"]);
+    let v = lib.json(&["ai", "query", "invoices"], "");
+    assert!(v["answer"].is_null());
+    assert!(v["fallback"].as_str().unwrap().contains("no <answer>"));
+    assert_eq!(slugs_of(&v, "hits")[0], "myapp/billing");
+
+    // The agent dies, or hangs past the timeout (which is cancelled).
+    for mode in ["exit", "hang"] {
+        let lib = Lib::with(seeded(), &[], "");
+        let cfg = lib.env.home.join("config.toml");
+        let text = fs::read_to_string(&cfg)
+            .unwrap()
+            .replace("timeout_secs = 5", "timeout_secs = 2");
+        fs::write(&cfg, text).unwrap();
+        let start = std::time::Instant::now();
+        let out = lib
+            .cmd()
+            .env("FAKE_ACP_MODE", mode)
+            .args(["ai", "query", "invoices"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(start.elapsed().as_secs() < 10, "{mode} took too long");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("no librarian answer"), "{mode}: {err}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("myapp/billing"));
+        if mode == "hang" {
+            assert!(err.contains("timed out"), "{err}");
+            assert!(
+                lib.received()
+                    .iter()
+                    .any(|m| m["method"] == "session/cancel")
+            );
+        }
+    }
+
+    // A model the agent doesn't offer: a warning, and the agent's default is used.
+    let lib = Lib::with(seeded(), &["<answer>ok</answer>"], "");
+    let cfg = lib.env.home.join("config.toml");
+    let text = fs::read_to_string(&cfg)
+        .unwrap()
+        .replace("model = \"haiku\"", "model = \"gpt-9\"");
+    fs::write(&cfg, text).unwrap();
+    let out = lib
+        .cmd()
+        .args(["ai", "query", "invoices", "--json"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("doesn't offer model `gpt-9`"));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["answer"], "ok");
+    assert_eq!(v["model"], "default");
+}
+
+#[test]
+fn librarian_permission_requests_are_rejected() {
+    let lib = Lib::new(&["<answer>ok</answer>"]);
+    let out = lib
+        .cmd()
+        .env("FAKE_ACP_MODE", "permission")
+        .args(["ai", "query", "invoices", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let msgs = lib.received();
+    let answers: Vec<&Value> = msgs
+        .iter()
+        .filter(|m| m.get("method").is_none() && m.get("id").is_some())
+        .collect();
+    assert_eq!(answers[0]["result"]["outcome"]["outcome"], "selected");
+    assert_eq!(answers[0]["result"]["outcome"]["optionId"], "no");
+    assert_eq!(
+        answers[1]["error"]["code"], -32601,
+        "fs requests are refused"
+    );
+}
+
+#[test]
+fn ai_models_lists_what_the_agent_offers() {
+    let lib = Lib::new(&[]);
+    let v = lib.json(&["ai", "models"], "");
+    let ids: Vec<&str> = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["default", "claude-haiku-5-5", "claude-sonnet-5-5"]);
+    assert_eq!(v["current"], "claude-haiku-5-5");
+    lib.cmd()
+        .args(["ai", "models"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "* claude-haiku-5-5  (Haiku) — Fastest",
+        ));
+}
+
+#[test]
+fn ai_record_writes_checked_proposals_as_the_librarian() {
+    let reply = "<page slug=\"myapp/billing\">\n```markdown\n---\ntitle: Billing\nsummary: How subscriptions, invoices and Stripe webhooks fit together.\n---\n\n# Billing\n\nInvoices go out monthly, on the 1st (UTC). See [[stripe]] and [[auth]].\n```\n</page>\n\
+<page slug=\"myapp/refunds\">\n---\ntitle: Refunds\nsummary: How refunds are issued and why they take five days. Read before touching src/refunds.\nsources: [src/refunds/**]\n---\n\n# Refunds\n\nIssued through [[billing]].\n</page>\n\
+<page slug=\"billing/proration\">\n---\ntitle: Proration\nsummary: How plan changes are prorated mid-cycle.\n---\nProrated daily.\n</page>\n\
+<page slug=\"myapp/auth\">\n---\ntitle: Auth\nsummary: x\n---\nnot shown in full, so refused\n</page>\n\
+<page slug=\"myapp/bad\">\n---\ntitle: Bad\n---\nno summary\n</page>\n\
+<message>Record the invoice date and refunds</message>";
+    let lib = Lib::new(&[reply, reply]);
+    let notes = "Invoices are sent on the 1st, UTC. Refunds take five days because of the bank.";
+
+    // Dry run: nothing written.
+    let v = lib.json(&["ai", "record", "--dry-run"], notes);
+    assert_eq!(v["dry_run"], true);
+    assert!(v["commit"].is_null());
+    assert!(!lib.env.wiki().join("myapp/refunds.md").exists());
+
+    let before = lib.env.log().len();
+    let v = lib.json(&["ai", "record"], notes);
+    let action = |slug: &str| {
+        v["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["slug"] == slug)
+            .map(|c| c["action"].as_str().unwrap().to_string())
+    };
+    assert_eq!(action("myapp/billing").as_deref(), Some("updated"));
+    assert_eq!(action("myapp/refunds").as_deref(), Some("created"));
+    assert_eq!(
+        action("myapp/billing/proration").as_deref(),
+        Some("created")
+    );
+    assert_eq!(action("myapp/auth").as_deref(), Some("refused"));
+    assert_eq!(action("myapp/bad").as_deref(), Some("refused"));
+
+    // The proposals went through the same checks and bookkeeping as `write`.
+    let billing = fs::read_to_string(lib.env.wiki().join("myapp/billing.md")).unwrap();
+    assert!(
+        billing.contains("on the 1st (UTC)")
+            && billing.contains("created: ")
+            && billing.contains("updated: ")
+    );
+    assert!(!billing.contains("```"), "fence removed");
+    assert!(
+        lib.env
+            .wiki()
+            .join("myapp/billing/refs/proration.md")
+            .exists(),
+        "a ref of billing"
+    );
+
+    // One commit, authored by the librarian, listing what changed.
+    let log = lib.env.log();
+    assert_eq!(log.len(), before + 1);
+    assert_eq!(
+        log[0],
+        "librarian (claude-haiku-5-5)|Record the invoice date and refunds"
+    );
+
+    // The prompt had the notes, the matching pages in full and the rest by summary.
+    let p = &lib.prompts()[1];
+    assert!(p.contains(notes));
+    assert!(
+        p.contains("<file slug=\"myapp/billing\">\n---\ntitle: Billing"),
+        "{p}"
+    );
+    assert!(
+        p.contains("summary says when to read the page"),
+        "writing rules included"
+    );
+}
+
+#[test]
+fn ai_tend_fixes_lint_problems_and_merges_duplicates() {
+    let env = Env::new();
+    env.write(
+        "billing",
+        &fm(
+            "Billing",
+            "How invoices are created and sent each month.",
+            "",
+            "See [[invoicing]] and [[missing-page]].",
+        ),
+    )
+    .success();
+    env.write(
+        "invoicing",
+        &fm(
+            "Invoicing",
+            "How invoices are created and sent every month.",
+            "",
+            "Monthly invoices. Linked from [[billing]].",
+        ),
+    )
+    .success();
+    env.write(
+        "lonely",
+        &fm(
+            "Lonely",
+            "A page that nothing links to, about caching rules.",
+            "",
+            "Cache for 5 minutes.",
+        ),
+    )
+    .success();
+    let fixed_billing = "---\ntitle: Billing\nsummary: How invoices are created and sent each month.\n---\n\nMonthly invoices. Caching: see [[lonely]].\n";
+    let reply = format!(
+        "<page slug=\"myapp/billing\">\n{fixed_billing}</page>\n<delete slug=\"myapp/invoicing\"/>\n<delete slug=\"myapp/lonely\"/>\n<message>Merge invoicing into billing</message>"
+    );
+    let lib = Lib::with(env, &[&reply], "");
+    let v = lib.json(&["ai", "tend"], "");
+    let action = |slug: &str| {
+        v["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["slug"] == slug)
+            .map(|c| {
+                (
+                    c["action"].as_str().unwrap().to_string(),
+                    c["reason"].as_str().unwrap_or("").to_string(),
+                )
+            })
+    };
+    assert_eq!(action("myapp/billing").unwrap().0, "updated");
+    assert_eq!(action("myapp/invoicing").unwrap().0, "deleted");
+    let (a, why) = action("myapp/lonely").unwrap();
+    assert_eq!(a, "refused");
+    assert!(why.contains("links to it"), "{why}");
+    assert!(!lib.env.wiki().join("myapp/invoicing.md").exists());
+    assert!(lib.env.wiki().join("myapp/lonely.md").exists());
+
+    let p = &lib.prompts()[0];
+    assert!(p.contains("[broken]") || p.contains("missing-page"), "{p}");
+    assert!(p.contains("[duplicate?]"), "{p}");
+    assert!(p.contains("<file slug=\"myapp/invoicing\">"), "{p}");
+    assert!(
+        p.contains("<file slug=\"myapp\">"),
+        "the hub, to link the orphan from: {p}"
+    );
+
+    // A clean wiki needs no librarian.
+    let env = Env::new();
+    env.cmd()
+        .args(["ai", "tend"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "nothing for the librarian to tend",
+        ));
+}
+
+#[test]
+fn install_sets_up_the_librarian_without_starting_it() {
+    let c = Claude::new();
+    c.run(&["install", "--yes"]).success();
+    let cfg = fs::read_to_string(c.env.home.join("config.toml")).unwrap();
+    assert!(
+        cfg.contains(
+            "[librarian]\nagent = \"claude\"\nenabled = true\nmodel = \"claude-haiku-5-5\""
+        ),
+        "{cfg}"
+    );
+    assert!(cfg.contains("[agents.claude]\ncommand = \"npx\"\nargs = [\"-y\", \"@agentclientprotocol/claude-agent-acp\"]"), "{cfg}");
+    assert!(cfg.contains("[[projects]]"), "projects kept");
+
+    // Again: nothing changes. A chosen model and turning it off are kept.
+    c.run(&["install", "--yes"])
+        .success()
+        .stdout(predicate::str::contains("nothing to change"));
+    c.run(&["install", "--yes", "--librarian-model", "claude-sonnet-5-5"])
+        .success();
+    let cfg = fs::read_to_string(c.env.home.join("config.toml")).unwrap();
+    assert!(cfg.contains("model = \"claude-sonnet-5-5\""));
+    c.run(&["install", "--yes", "--no-librarian"]).success();
+    let cfg = fs::read_to_string(c.env.home.join("config.toml")).unwrap();
+    assert!(cfg.contains("enabled = false") && cfg.contains("claude-sonnet-5-5"));
+}

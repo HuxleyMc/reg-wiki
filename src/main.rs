@@ -4,6 +4,7 @@ mod git;
 mod home;
 mod hooks;
 mod install;
+mod librarian;
 mod links;
 mod lint;
 mod page;
@@ -141,6 +142,12 @@ pub enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Ask the librarian, an agent that reads the wiki for you (see `[librarian]` in
+    /// config.toml; set up by `reg-wiki install`).
+    Ai {
+        #[command(subcommand)]
+        cmd: AiCmd,
+    },
     /// Manage projects.
     Project {
         #[command(subcommand)]
@@ -177,6 +184,15 @@ pub struct InstallArgs {
     /// session changed code but wrote nothing to the wiki.
     #[arg(long)]
     pub stop_hook: bool,
+    /// Don't set up the librarian (or turn it off if it was).
+    #[arg(long, conflicts_with_all = ["librarian_agent", "librarian_model"])]
+    pub no_librarian: bool,
+    /// Agent the librarian runs on: a key into `[agents.*]` in config.toml (default: claude).
+    #[arg(long, value_name = "NAME")]
+    pub librarian_agent: Option<String>,
+    /// Model for the librarian (default: claude-haiku-5-5). `reg-wiki ai models` lists them.
+    #[arg(long, value_name = "MODEL")]
+    pub librarian_model: Option<String>,
     /// Print the files and settings for this target instead of writing them.
     #[arg(long, value_name = "TARGET")]
     pub print_config: Option<String>,
@@ -190,6 +206,38 @@ pub struct UninstallArgs {
     /// Don't ask for confirmation.
     #[arg(short = 'y', long)]
     pub yes: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AiCmd {
+    /// Answer a question from the best-matching pages, citing them. Falls back to plain
+    /// `query` results when the librarian is off or fails.
+    Query {
+        #[arg(required = true, num_args = 1..)]
+        question: Vec<String>,
+        /// How many search results to show if it falls back to plain search.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Turn rough notes (stdin) into page edits; reg-wiki checks them and commits the
+    /// ones that pass as `librarian (<model>)`.
+    Record {
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Fix what `lint` finds that needs judgment: broken links, orphans, weak
+    /// summaries, long pages, likely duplicates.
+    Tend {
+        /// At most this many pages with problems per pass.
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List the models the librarian's agent offers.
+    Models,
 }
 
 #[derive(Subcommand, Debug)]

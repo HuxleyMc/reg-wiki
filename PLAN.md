@@ -164,12 +164,14 @@ These use the same arrangement. `reg-wiki` finds the related pages and sends the
 
 ### ACP details
 
-- `reg-wiki` is the ACP client, built on the `agent-client-protocol` crate (v1.0). It starts the agent as a subprocess and talks JSON-RPC over stdio.
+- `reg-wiki` is the ACP client (protocol version 1). It starts the agent as a subprocess and talks newline-delimited JSON-RPC over stdio. The client is a few hundred lines of synchronous Rust (`src/librarian/acp.rs`, std threads and `serde_json`) rather than the `agent-client-protocol` crate: reg-wiki uses only `initialize`, `session/new`, `session/set_config_option` (or the older `session/set_model`), `session/prompt`, `session/cancel` and `session/update`, while the crate's API has changed with every major version (it is at v5) and would bring in tokio.
 - **Capabilities:** `reg-wiki` advertises no `fs` or `terminal` support, and the session has `cwd` set to an empty temporary directory.
-- **Model choice:** after `session/new`, `reg-wiki` reads the `configOptions` entry with category `model` and calls `session/set_config_option`. `reg-wiki install` lists the models the agent actually offers.
+- **Model choice:** after `session/new`, `reg-wiki` reads the `configOptions` entry with category `model` and calls `session/set_config_option`. The configured model is matched by id, then by name, then by a unique partial match; if the agent doesn't offer it, `reg-wiki` warns and uses the agent's default. `reg-wiki install` (interactively) and `reg-wiki ai models` list the models the agent actually offers.
 - **Reply:** `reg-wiki` collects `agent_message_chunk` updates until `stopReason: end_turn`. A timeout sends `session/cancel` and then falls back to `reg-wiki query`.
 - **Recursion guard:** the agent runs with `REG_LIBRARIAN=1`, so the `reg-wiki` hooks do nothing inside it.
 - **Latency:** v1 starts the agent fresh for each call, which takes a few seconds. A warm `reg-wiki daemon` that keeps one session open can come later, if needed.
+- **Edits:** `record` and `tend` replies are `<page slug="…">` blocks holding whole files, `<delete slug="…"/>` (tend only) and a `<message>`. The librarian may change only pages it was shown in full, and only if they haven't changed since (checked by hash under the write lock). A new `<page>/<name>` slug under an existing main page becomes a ref of it. Deletes are refused for hubs, pages with refs, and pages something still links to after the batch.
+- **Off by default:** without a `[librarian]` section the librarian is off and `ai query` falls back to search. The agent's stderr goes nowhere unless `REG_LIBRARIAN_LOG` names a file.
 
 ```toml
 [librarian]
@@ -182,7 +184,8 @@ timeout_secs = 90
 
 [agents.claude]
 command = "npx"
-args = ["-y", "@zed-industries/claude-agent-acp"]  # check the exact package name when building
+args = ["-y", "@agentclientprotocol/claude-agent-acp"]
+# env = { SOME_VAR = "value" }   # optional extra environment for the agent
 ```
 
 ## Architecture
@@ -201,11 +204,11 @@ src/
   view/            # html template, css and a small hand-written force layout (include_str!)
   hooks/           # one module per event, reads hook JSON from stdin
   install/         # per-target installers, embedded skill files
-  librarian/       # ACP client, permission policy, prompts
+  librarian/       # ACP client, permission policy, prompts, reply parsing
   cmd/             # one file per subcommand
 ```
 
-Crates: `clap`, `serde`, `serde_json`, `serde_yaml_ng`, `toml`, `rusqlite` (bundled), `pulldown-cmark`, `walkdir`, `globset`, `jiff`, `open`, `anyhow`, `fs4` (file locking), `agent-client-protocol`, `tokio` (only for the librarian). Tests use `assert_cmd`, `insta` and `tempfile`, with `REG_HOME` pointed at a temporary directory.
+Crates: `clap`, `serde`, `serde_json`, `serde_yaml_ng`, `toml`, `rusqlite` (bundled), `pulldown-cmark`, `walkdir`, `globset`, `jiff`, `open`, `anyhow`, `fs4` (file locking), and no ACP crate (the client is hand-written, see above). Tests use `assert_cmd`, `insta` and `tempfile`, with `REG_HOME` pointed at a temporary directory.
 
 ## Milestones
 

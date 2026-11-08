@@ -1,5 +1,6 @@
 //! Subcommands and the context they share.
 
+mod ai;
 mod links;
 mod lint;
 mod list;
@@ -24,7 +25,7 @@ use rusqlite::Connection;
 use crate::db::{self, PageRow, reconcile};
 use crate::home::{Config, Home, SHARED};
 use crate::links::Resolution;
-use crate::{Cli, Command, ProjectCmd, git, util};
+use crate::{AiCmd, Cli, Command, ProjectCmd, git, util};
 
 pub fn run(cli: Cli) -> Result<ExitCode> {
     // These run before the index is opened: hooks must never fail the agent's session,
@@ -65,6 +66,12 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             base,
             message,
         } => write::run(&mut ctx, &slug, base.as_deref(), &message),
+        Command::Ai { cmd } => match cmd {
+            AiCmd::Query { question, limit } => ai::query(&ctx, &question.join(" "), limit),
+            AiCmd::Record { dry_run } => ai::record(&mut ctx, dry_run),
+            AiCmd::Tend { limit, dry_run } => ai::tend(&mut ctx, limit, dry_run),
+            AiCmd::Models => ai::models(&ctx),
+        },
         Command::Project { cmd } => match cmd {
             ProjectCmd::Add { name } => project::add(&mut ctx, name.as_deref()),
             ProjectCmd::List => project::list(&ctx),
@@ -284,7 +291,16 @@ impl Ctx {
 
     /// Commit several wiki paths at once (moves, fixes).
     pub fn commit(&self, paths: &[&str], message: &str) -> Result<Option<String>> {
-        let commit = git::commit(&self.home.wiki, paths, message, &self.author())?;
+        self.commit_as(paths, message, &self.author())
+    }
+
+    pub fn commit_as(
+        &self,
+        paths: &[&str],
+        message: &str,
+        author: &git::Author,
+    ) -> Result<Option<String>> {
+        let commit = git::commit(&self.home.wiki, paths, message, author)?;
         self.mark_session_write();
         Ok(commit)
     }

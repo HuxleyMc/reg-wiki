@@ -15,6 +15,7 @@ The current project is detected from the working directory (its git remote). Com
    - `reg-wiki context "how do webhooks get retried"`: the best-matching pages' bodies plus summaries of what they link to, in one call, within a token budget. Usually the best first step.
    - `reg-wiki query stripe webhook`: ranked list of matches (slug, summary, snippet) when you want to choose.
    - `reg-wiki read <slug>`: one page in full. The footer gives its `hash` (needed to write it), its refs, links and backlinks, each with a summary. Follow those only when a summary says you need them.
+   - `reg-wiki ai query "how do webhooks get retried"`: if a librarian is set up, it reads the matching pages and answers in a few lines with its sources, which costs you less context than `context` when the answer is spread over many pages. Without one, you get `query` results.
 2. **Do the work.** Trust the wiki, but if it disagrees with the code, the code wins, and the page needs fixing.
 3. **Write back what you learned**, before you finish: anything that took real effort to find out, or that you'd want to know next time. Update the closest existing page rather than adding a new one.
 
@@ -32,6 +33,8 @@ sources: [src/billing/**]
 …the whole page, edited…
 EOF
 ```
+
+If a librarian is set up, `reg-wiki ai record` with rough notes on stdin turns them into page edits for you (checked and committed like `write`); check what it reports and fix anything it got wrong.
 
 `write` replaces the whole page with stdin. Send it without frontmatter to keep the page's current frontmatter. `--base` refuses the write if someone changed the page since you read it (exit code 3, current content on stdout): merge your change into it and retry with the new hash. `-m` says *why*; it's the commit message people review. Use a quoted heredoc (`<<'EOF'`) as above, so the shell leaves `$` and backticks alone and the command stays a single `reg-wiki` call.
 

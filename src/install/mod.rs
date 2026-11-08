@@ -2,6 +2,7 @@
 //! now; other targets would get their own module with the same shape.
 
 mod claude;
+mod librarian;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -43,7 +44,13 @@ pub fn install(cli: &Cli, a: &InstallArgs) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     check_target(&a.target)?;
-    let plan = claude::plan_install(a)?;
+    let mut plan = claude::plan_install(a)?;
+    let interactive = !a.yes && std::io::stdin().is_terminal();
+    let mut notes = Vec::new();
+    if let Some(c) = librarian::plan(a, interactive, &mut notes)? {
+        plan.changes.push(c);
+    }
+    plan.notes.extend(notes);
     apply(cli.json, a.yes, "install", plan)
 }
 
@@ -92,7 +99,7 @@ fn apply(json: bool, yes: bool, verb: &str, plan: Plan) -> Result<ExitCode> {
     if !yes {
         if !std::io::stdin().is_terminal() {
             bail!(
-                "{verb} would change files in ~/.claude; run it with --yes to go ahead without asking"
+                "{verb} would change files in ~/.claude and ~/.reg; run it with --yes to go ahead without asking"
             );
         }
         eprintln!("reg-wiki {verb} will:");

@@ -22,22 +22,27 @@ pub fn query(ctx: &Ctx, text: &str, limit: usize, tags: &[String]) -> Result<Exi
         print_json(&json!({ "query": text, "matched_all_words": strict, "hits": hits }));
         return Ok(ExitCode::SUCCESS);
     }
+    print_hits(text, &hits, strict);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The text form of `query`'s results.
+pub fn print_hits(text: &str, hits: &[search::Hit], strict: bool) {
     if hits.is_empty() {
         eprintln!(
             "no pages match `{text}`; if you work out the answer, record it with `reg-wiki new`"
         );
-        return Ok(ExitCode::SUCCESS);
+        return;
     }
     if !strict {
         eprintln!("no page matches every word; showing pages that match some of them");
     }
-    for h in &hits {
+    for h in hits {
         println!("{}", line(&h.page));
         if !h.snippet.is_empty() {
             println!("    {}", h.snippet);
         }
     }
-    Ok(ExitCode::SUCCESS)
 }
 
 pub fn context(
