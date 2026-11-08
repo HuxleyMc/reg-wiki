@@ -15,6 +15,7 @@ pub struct Args {
     pub summary: String,
     pub parent: Option<String>,
     pub tags: Vec<String>,
+    pub sources: Vec<String>,
     pub message: Option<String>,
 }
 
@@ -60,9 +61,12 @@ pub fn run(ctx: &mut Ctx, a: Args) -> Result<ExitCode> {
         .rsplit_once('/')
         .map(|(p, _)| p.to_string())
         .filter(|_| a.parent.is_some());
-    let similar: Vec<_> = search::similar(&ctx.conn, &a.title, 3)?
+    let similar: Vec<_> = search::similar(&ctx.conn, &a.title, 4)?
         .into_iter()
         .filter(|p| Some(&p.slug) != parent_slug.as_ref())
+        // A project hub shares words with everything in its project; it's never a duplicate.
+        .filter(|p| p.slug.contains('/'))
+        .take(3)
         .collect();
     if !similar.is_empty() && !ctx.json {
         warn("similar pages exist; consider updating one of them instead:");
@@ -83,6 +87,12 @@ pub fn run(ctx: &mut Ctx, a: Args) -> Result<ExitCode> {
         "tags",
         Value::Sequence(a.tags.iter().map(|t| Value::from(t.as_str())).collect()),
     );
+    if !a.sources.is_empty() {
+        pg.set(
+            "sources",
+            Value::Sequence(a.sources.iter().map(|g| Value::from(g.trim())).collect()),
+        );
+    }
     pg.set("created", today.as_str());
     pg.set("updated", today.as_str());
     pg.set("status", "draft");

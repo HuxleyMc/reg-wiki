@@ -45,6 +45,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             summary,
             parent,
             tags,
+            sources,
             message,
         } => new::run(
             &mut ctx,
@@ -54,6 +55,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 summary,
                 parent,
                 tags,
+                sources,
                 message,
             },
         ),

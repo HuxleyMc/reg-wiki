@@ -1667,3 +1667,29 @@ fn closed_stdout_is_not_a_panic() {
     let out = child.wait_with_output().unwrap();
     assert!(!String::from_utf8_lossy(&out.stderr).contains("panicked"));
 }
+
+#[test]
+fn new_takes_sources_and_does_not_flag_the_hub_as_similar() {
+    let env = Env::new();
+    env.cmd()
+        .args([
+            "new",
+            "project-detection",
+            "--title",
+            "Project detection",
+            "--summary",
+            "Read before changing how the cwd maps to a project.",
+            "--source",
+            "src/project.rs",
+            "--source",
+            "src/home.rs",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("similar").not());
+    let text = fs::read_to_string(env.wiki().join("myapp/project-detection.md")).unwrap();
+    assert!(
+        text.contains("sources: [src/project.rs, src/home.rs]\n"),
+        "{text}"
+    );
+}

@@ -35,7 +35,7 @@ EOF
 
 `write` replaces the whole page with stdin. Send it without frontmatter to keep the page's current frontmatter. `--base` refuses the write if someone changed the page since you read it (exit code 3, current content on stdout): merge your change into it and retry with the new hash. `-m` says *why*; it's the commit message people review. Use a quoted heredoc (`<<'EOF'`) as above, so the shell leaves `$` and backticks alone and the command stays a single `reg-wiki` call.
 
-To add a page: search first (`reg-wiki query`), then either `reg-wiki new <slug> --title … --summary …` followed by `write`, or `write` a new slug directly with full frontmatter. `new` warns when similar pages exist; if one fits, update it instead.
+To add a page, search first (`reg-wiki query`). Then `write` the new slug directly with full frontmatter (one step), or run `reg-wiki new <slug> --title … --summary … [--source 'src/billing/**']`, which commits a stub and warns about similar pages, and fill it in with `write`. If a similar page fits, update it instead. Set `sources` to the code the page describes: whoever edits those files later is reminded of the page.
 
 ## When to write
 

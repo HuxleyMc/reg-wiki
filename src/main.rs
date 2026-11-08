@@ -65,6 +65,10 @@ pub enum Command {
         parent: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// Code the page describes, as a glob relative to the project root, e.g.
+        /// `src/billing/**` (repeatable). Edits to these files remind agents of the page.
+        #[arg(long = "source", value_name = "GLOB")]
+        sources: Vec<String>,
         /// Commit message (why the page exists).
         #[arg(short = 'm', long)]
         message: Option<String>,

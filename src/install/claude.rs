@@ -23,7 +23,7 @@ const CLAUDE_MD_SECTION: &str = "\
 <!-- reg-wiki:start -->
 ## Wiki (reg-wiki)
 
-A wiki of linked Markdown pages is available through the `reg-wiki` CLI; the current project's pages are listed at session start. Before working on a part of the code, check what the wiki knows: `reg-wiki context \"<question>\"` or `reg-wiki read <slug>`. When you learn something a later session would want (a decision and its reason, a gotcha, how a part fits together), update the closest page with `reg-wiki write` or add one with `reg-wiki new`. The reg-wiki skill has the details.
+A wiki of linked Markdown pages is available through the `reg-wiki` CLI; the current project's pages are listed at session start. Before working on a part of the code, check what the wiki knows: `reg-wiki context \"<question>\"` or `reg-wiki read <slug>`. When you learn something a later session would want (a decision and its reason, a gotcha, how a part fits together), record it before you finish: update the closest page (`reg-wiki read <slug>`, then `reg-wiki write <slug> --base <hash> -m \"why\"` with the page on stdin), or write a new slug with full frontmatter, including `sources:` globs for the code it describes. The reg-wiki skill has the details.
 <!-- reg-wiki:end -->
 ";
 

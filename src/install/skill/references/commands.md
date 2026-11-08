@@ -30,7 +30,7 @@ Slugs can be given in full (`myapp/billing`, `_shared/x`) or short (`billing`), 
 | Command | Does |
 |---|---|
 | `reg-wiki write <slug> -m "why" [--base <hash>]` | Replaces the page with the Markdown on stdin, validates it, sets `updated`, commits with `-m` as the message and reports broken links. Without frontmatter on stdin, the page keeps its current frontmatter. A slug that doesn't exist yet is created (needs frontmatter with `title` and `summary`). Writing identical content is a no-op. |
-| `reg-wiki new <slug> --title T --summary S [--parent P] [--tag T…] [-m "why"]` | Creates a draft page with that frontmatter and a heading, commits it, and prints its hash for the following `write`. With `--parent`, creates a ref under that page. Warns about pages with similar titles. Fails if the page exists. |
+| `reg-wiki new <slug> --title T --summary S [--parent P] [--tag T…] [--source GLOB…] [-m "why"]` | Creates a draft page with that frontmatter (`--source` fills `sources`) and a heading, commits it, and prints its hash for the following `write`. With `--parent`, creates a ref under that page. Warns about pages with similar titles. Fails if the page exists. |
 | `reg-wiki mv <old> <new> [-m "why"]` | Renames a page, with its refs and subpages, and rewrites every link to it, in one commit. Works across projects. |
 
 `write --base <hash>` (at least 4 characters of the hash from `read`) refuses the write if the page changed since: it exits with code **3**, prints the current content on stdout and the new hash on stderr. Merge and retry with the new hash.
