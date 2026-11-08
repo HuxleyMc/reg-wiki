@@ -43,7 +43,11 @@ impl Env {
         c.current_dir(dir)
             .env("REG_HOME", &self.home)
             .env("REG_AGENT", "test-agent")
-            .env_remove("CLAUDECODE");
+            .env_remove("CLAUDECODE")
+            .env_remove("REG_SESSION")
+            .env_remove("REG_LIBRARIAN")
+            .env_remove("CLAUDE_ENV_FILE")
+            .env_remove("CLAUDE_CONFIG_DIR");
         c
     }
 
@@ -959,4 +963,691 @@ fn old_index_is_migrated() {
         slugs_of(&env.json(&["query", "invoice"]), "hits"),
         vec!["myapp/billing"]
     );
+}
+
+// ---- Milestone 3: agents ----
+
+impl Env {
+    /// Run `reg-wiki hook <event>` with `input` on stdin. Hooks always exit 0; returns
+    /// the parsed JSON output, or `None` if the hook printed nothing.
+    fn hook(&self, event: &str, input: Value) -> Option<Value> {
+        self.hook_with(event, input, &[])
+    }
+
+    fn hook_with(&self, event: &str, input: Value, envs: &[(&str, &str)]) -> Option<Value> {
+        let mut c = self.cmd();
+        for (k, v) in envs {
+            c.env(k, v);
+        }
+        let out = c
+            .args(["hook", event])
+            .write_stdin(input.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "hook {event} exited {:?}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(serde_json::from_str(&text).unwrap())
+        }
+    }
+
+    fn input(&self, extra: Value) -> Value {
+        let mut v = serde_json::json!({ "session_id": "sess-1", "cwd": self.repo });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    }
+}
+
+/// The `slug — summary` lines of the session start index.
+fn listed(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|l| l.contains(" — ") && !l.starts_with("reg-wiki:"))
+        .collect()
+}
+
+fn context_of(v: &Option<Value>) -> String {
+    v.as_ref().expect("hook printed nothing")["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn session_start_lists_the_project_hub_first_within_the_cap() {
+    let env = seeded();
+    let out = env.hook(
+        "session-start",
+        env.input(serde_json::json!({ "hook_event_name": "SessionStart", "source": "startup" })),
+    );
+    assert_eq!(
+        out.as_ref().unwrap()["hookSpecificOutput"]["hookEventName"],
+        "SessionStart"
+    );
+    let text = context_of(&out);
+    let lines = listed(&text);
+    assert!(lines[0].starts_with("myapp — "), "{text}");
+    assert!(text.contains("myapp/billing — How subscriptions"), "{text}");
+    // Refs are left out; they're reached through their page.
+    assert!(!text.contains("myapp/billing/stripe"), "{text}");
+
+    // Capped: with many pages, the list is cut and says how many are left.
+    for i in 0..80 {
+        env.write(
+            &format!("page-{i}"),
+            &page(
+                &format!("Page {i}"),
+                "A page that exists to fill the session start list up.",
+                "x",
+            ),
+        )
+        .success();
+    }
+    env.cmd()
+        .args(["write", "_shared/conventions", "-m", "t"])
+        .write_stdin(fm(
+            "Conventions",
+            "Team conventions for every project.",
+            "tags: [hub]\n",
+            "x",
+        ))
+        .assert()
+        .success();
+    let text = context_of(&env.hook("session-start", env.input(serde_json::json!({}))));
+    assert!(text.chars().count() / 4 <= 1600, "{} chars", text.len());
+    assert!(text.contains("more: `reg-wiki list`"), "{text}");
+    let lines = listed(&text);
+    // Hubs first: the project's, then shared hubs.
+    assert!(lines[0].starts_with("myapp — "), "{text}");
+    assert!(lines[1].starts_with("_shared/conventions — "), "{text}");
+    // Then the most linked-to pages.
+    assert!(
+        lines[2].starts_with("myapp/billing — ") || lines[2].starts_with("myapp/auth — "),
+        "{text}"
+    );
+
+    // `[limits] session_start_tokens` changes the cap.
+    fs::write(
+        env.home.join("config.toml"),
+        format!(
+            "{}\n[limits]\nsession_start_tokens = 200\n",
+            fs::read_to_string(env.home.join("config.toml")).unwrap()
+        ),
+    )
+    .unwrap();
+    let text = context_of(&env.hook("session-start", env.input(serde_json::json!({}))));
+    assert!(text.len() < 1000, "{text}");
+}
+
+#[test]
+fn session_start_exports_the_session_id_for_later_writes() {
+    let env = seeded();
+    let envfile = env.home.join("claude-env");
+    env.hook_with(
+        "session-start",
+        env.input(serde_json::json!({})),
+        &[("CLAUDE_ENV_FILE", envfile.to_str().unwrap())],
+    );
+    assert_eq!(
+        fs::read_to_string(&envfile).unwrap(),
+        "export REG_SESSION=sess-1\n"
+    );
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(env.home.join("sessions/sess-1.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["tagged"], true);
+    assert_eq!(state["wrote"], false);
+
+    // A write from inside the session marks it.
+    env.cmd()
+        .env("REG_SESSION", "sess-1")
+        .args(["write", "auth", "-m", "t"])
+        .write_stdin("# Auth\n\nChanged.\n")
+        .assert()
+        .success();
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(env.home.join("sessions/sess-1.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["wrote"], true);
+}
+
+#[test]
+fn session_start_outside_a_project_shows_shared_pages_or_nothing() {
+    let env = Env::new();
+    let elsewhere = env.home.parent().unwrap().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let input = serde_json::json!({ "session_id": "s", "cwd": elsewhere });
+    assert!(env.hook("session-start", input.clone()).is_none());
+    env.cmd()
+        .args(["write", "_shared/git-tips", "-m", "t"])
+        .write_stdin(page(
+            "Git tips",
+            "Read when a rebase or merge goes wrong.",
+            "x",
+        ))
+        .assert()
+        .success();
+    let text = context_of(&env.hook("session-start", input));
+    assert!(text.contains("isn't a registered wiki project"), "{text}");
+    assert!(text.contains("_shared/git-tips — "), "{text}");
+}
+
+#[test]
+fn prompt_hook_suggests_matching_pages_once_and_is_quiet_otherwise() {
+    let env = seeded();
+    let ask = |prompt: &str, sid: &str| {
+        env.hook(
+            "user-prompt-submit",
+            serde_json::json!({ "session_id": sid, "cwd": env.repo, "prompt": prompt }),
+        )
+    };
+    let text = context_of(&ask("Why are stripe webhooks retried so often?", "a"));
+    assert!(text.starts_with("Relevant wiki pages"), "{text}");
+    assert!(text.contains("myapp/billing/stripe — "), "{text}");
+    // Not again in the same session…
+    assert!(ask("Why are stripe webhooks retried so often?", "a").is_none());
+    // …but in another one.
+    assert!(ask("Why are stripe webhooks retried so often?", "b").is_some());
+    // Unrelated prompts, slash commands and empty prompts print nothing.
+    assert!(ask("rename the variable in main.rs to something clearer", "c").is_none());
+    assert!(ask("/compact", "c").is_none());
+    assert!(ask("", "c").is_none());
+    // A one-word prompt matching a title is enough.
+    assert!(context_of(&ask("login", "d")).contains("myapp/auth"));
+    // Hubs are never suggested.
+    assert!(
+        ask("myapp project overview hub", "e")
+            .is_none_or(|v| !context_of(&Some(v)).contains("myapp —"))
+    );
+}
+
+#[test]
+fn post_tool_use_reminds_about_pages_whose_sources_were_edited() {
+    let env = seeded();
+    env.write(
+        "billing",
+        &fm(
+            "Billing",
+            "How subscriptions, invoices and Stripe webhooks fit together.",
+            "sources: [src/billing/**, Cargo.toml]\n",
+            "[[stripe]] [[auth]]",
+        ),
+    )
+    .success();
+    fs::create_dir_all(env.repo.join("src/billing")).unwrap();
+    fs::write(env.repo.join("src/billing/retry.rs"), "x").unwrap();
+    fs::write(env.repo.join("src/main.rs"), "x").unwrap();
+    let edit = |tool: &str, file: &Path, sid: &str| {
+        env.hook(
+            "post-tool-use",
+            serde_json::json!({
+                "session_id": sid, "cwd": env.repo, "hook_event_name": "PostToolUse",
+                "tool_name": tool, "tool_input": { "file_path": file },
+                "tool_response": { "success": true },
+            }),
+        )
+    };
+    let out = edit("Edit", &env.repo.join("src/billing/retry.rs"), "a");
+    assert_eq!(
+        out.as_ref().unwrap()["hookSpecificOutput"]["hookEventName"],
+        "PostToolUse"
+    );
+    let text = context_of(&out);
+    assert!(
+        text.contains("src/billing/retry.rs is documented by"),
+        "{text}"
+    );
+    assert!(text.contains("myapp/billing — "), "{text}");
+    assert!(text.contains("reg-wiki write"), "{text}");
+    // Once per page per session.
+    assert!(edit("Write", &env.repo.join("Cargo.toml"), "a").is_none());
+    assert!(edit("Write", &env.repo.join("Cargo.toml"), "b").is_some());
+    // Files no page covers, other tools, and files outside any project: nothing.
+    assert!(edit("Edit", &env.repo.join("src/main.rs"), "c").is_none());
+    assert!(edit("Read", &env.repo.join("src/billing/retry.rs"), "c").is_none());
+    let outside = env.home.parent().unwrap().join("loose.rs");
+    fs::write(&outside, "x").unwrap();
+    assert!(edit("Edit", &outside, "c").is_none());
+    // Relative paths resolve against the hook's cwd.
+    assert!(edit("Edit", Path::new("src/billing/retry.rs"), "d").is_some());
+
+    // Editing a wiki file by hand: told once that it isn't committed.
+    let wiki_file = env.wiki().join("myapp/auth.md");
+    let text = context_of(&edit("Edit", &wiki_file, "e"));
+    assert!(
+        text.contains("edited the wiki file myapp/auth.md directly"),
+        "{text}"
+    );
+    assert!(edit("Edit", &wiki_file, "e").is_none());
+}
+
+#[test]
+fn stop_hook_asks_once_when_code_changed_and_the_wiki_did_not() {
+    let env = seeded();
+    fs::write(env.repo.join("main.rs"), "x").unwrap();
+    let stop = |sid: &str, active: bool| {
+        env.hook(
+            "stop",
+            serde_json::json!({ "session_id": sid, "cwd": env.repo, "stop_hook_active": active }),
+        )
+    };
+    let edit = |sid: &str| {
+        env.hook(
+            "post-tool-use",
+            serde_json::json!({ "session_id": sid, "cwd": env.repo, "tool_name": "Edit",
+                                "tool_input": { "file_path": env.repo.join("main.rs") } }),
+        )
+    };
+    // Nothing edited: nothing to say.
+    env.hook(
+        "session-start",
+        env.input(serde_json::json!({ "session_id": "a" })),
+    );
+    assert!(stop("a", false).is_none());
+
+    edit("a");
+    let out = stop("a", false).expect("stop should ask");
+    assert_eq!(out["decision"], "block");
+    let reason = out["reason"].as_str().unwrap();
+    assert!(reason.contains("changed 1 file(s) (main.rs)"), "{reason}");
+    assert!(reason.contains("reg-wiki write"), "{reason}");
+    // Only once.
+    assert!(stop("a", false).is_none());
+
+    // Already continuing because of a stop hook: never block again.
+    env.hook(
+        "session-start",
+        env.input(serde_json::json!({ "session_id": "b" })),
+    );
+    edit("b");
+    assert!(stop("b", true).is_none());
+
+    // A session that wrote to the wiki isn't asked. Without REG_SESSION, any write since
+    // the session started counts.
+    env.hook(
+        "session-start",
+        env.input(serde_json::json!({ "session_id": "c" })),
+    );
+    edit("c");
+    env.cmd()
+        .args(["write", "auth", "-m", "t"])
+        .write_stdin("# Auth\n\nNew.\n")
+        .assert()
+        .success();
+    assert!(stop("c", false).is_none());
+
+    // With REG_SESSION, only this session's writes count.
+    let envfile = env.home.join("claude-env");
+    let ef = [("CLAUDE_ENV_FILE", envfile.to_str().unwrap())];
+    env.hook_with(
+        "session-start",
+        env.input(serde_json::json!({ "session_id": "d" })),
+        &ef,
+    );
+    env.hook_with(
+        "session-start",
+        env.input(serde_json::json!({ "session_id": "e" })),
+        &ef,
+    );
+    edit("d");
+    edit("e");
+    env.cmd()
+        .env("REG_SESSION", "d")
+        .args(["write", "auth", "-m", "t"])
+        .write_stdin("# Auth\n\nNewer.\n")
+        .assert()
+        .success();
+    assert!(stop("d", false).is_none());
+    assert!(stop("e", false).is_some());
+}
+
+#[test]
+fn hooks_never_fail_and_do_nothing_for_the_librarian() {
+    let env = seeded();
+    let input = env.input(serde_json::json!({ "prompt": "stripe webhooks" }));
+    assert!(env.hook("user-prompt-submit", input.clone()).is_some());
+    assert!(
+        env.hook_with(
+            "user-prompt-submit",
+            input.clone(),
+            &[("REG_LIBRARIAN", "1")]
+        )
+        .is_none()
+    );
+    // Garbage input, unknown events and a broken REG_HOME: exit 0, nothing on stdout.
+    for (event, stdin) in [
+        ("session-start", "not json"),
+        ("pre-tool-use", "{}"),
+        ("stop", ""),
+    ] {
+        env.cmd()
+            .args(["hook", event])
+            .write_stdin(stdin)
+            .assert()
+            .success()
+            .stdout("");
+    }
+    let file = env.home.parent().unwrap().join("a-file");
+    fs::write(&file, "x").unwrap();
+    env.cmd()
+        .env("REG_HOME", &file)
+        .args(["hook", "session-start"])
+        .write_stdin(input.to_string())
+        .assert()
+        .success()
+        .stdout("");
+}
+
+// ---- install / uninstall ----
+
+struct Claude {
+    env: Env,
+    home: PathBuf,
+}
+
+impl Claude {
+    fn new() -> Claude {
+        let env = Env::new();
+        let home = env.home.parent().unwrap().join("userhome");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        Claude { env, home }
+    }
+
+    fn cmd(&self) -> Command {
+        let mut c = self.env.cmd();
+        c.env("HOME", &self.home);
+        c
+    }
+
+    fn run(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.cmd().args(args).assert()
+    }
+
+    fn path(&self, rel: &str) -> PathBuf {
+        self.home.join(".claude").join(rel)
+    }
+
+    fn settings(&self) -> Value {
+        serde_json::from_str(&fs::read_to_string(self.path("settings.json")).unwrap()).unwrap()
+    }
+
+    /// Every file under ~/.claude with its content, for before/after comparisons.
+    fn snapshot(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut stack = vec![self.home.join(".claude")];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    out.push((p.display().to_string(), "<dir>".into()));
+                    stack.push(p);
+                } else {
+                    out.push((p.display().to_string(), fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+const USER_SETTINGS: &str = r#"{
+  "model": "opus",
+  "permissions": {
+    "allow": [
+      "Bash(npm run test *)"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "prettier --write"
+          }
+        ]
+      }
+    ]
+  },
+  "zzz_unknown": {
+    "kept": true
+  }
+}
+"#;
+
+#[test]
+fn install_merges_into_existing_settings_and_uninstall_restores_them() {
+    let c = Claude::new();
+    fs::write(c.path("settings.json"), USER_SETTINGS).unwrap();
+    fs::write(c.path("CLAUDE.md"), "# My rules\n\nBe brief.\n").unwrap();
+    let before = c.snapshot();
+
+    c.run(&["install", "--yes"])
+        .success()
+        .stdout(predicate::str::contains("settings.json"));
+
+    // Skill files.
+    let skill = fs::read_to_string(c.path("skills/reg-wiki/SKILL.md")).unwrap();
+    assert!(
+        skill.starts_with("---\nname: reg-wiki\ndescription: "),
+        "{skill}"
+    );
+    for f in ["references/writing-pages.md", "references/commands.md"] {
+        assert!(c.path("skills/reg-wiki").join(f).is_file(), "{f}");
+    }
+
+    // Settings: user keys untouched and in order, our hooks added next to theirs.
+    let s = c.settings();
+    let keys: Vec<&String> = s.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["model", "permissions", "hooks", "zzz_unknown"]);
+    assert_eq!(s["zzz_unknown"]["kept"], true);
+    assert_eq!(
+        s["permissions"]["allow"],
+        serde_json::json!(["Bash(npm run test *)", "Bash(reg-wiki:*)"])
+    );
+    let post = s["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post.len(), 2);
+    assert_eq!(post[0]["hooks"][0]["command"], "prettier --write");
+    assert_eq!(post[1]["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
+    let cmd = post[1]["hooks"][0]["command"].as_str().unwrap();
+    assert!(cmd.ends_with("reg-wiki hook post-tool-use"), "{cmd}");
+    assert_eq!(
+        s["hooks"]["SessionStart"][0]["matcher"],
+        "startup|clear|compact"
+    );
+    assert!(s["hooks"]["UserPromptSubmit"][0].get("matcher").is_none());
+    // Stop is opt-in.
+    assert!(s["hooks"].get("Stop").is_none());
+
+    let md = fs::read_to_string(c.path("CLAUDE.md")).unwrap();
+    assert!(
+        md.starts_with("# My rules\n\nBe brief.\n\n<!-- reg-wiki:start -->"),
+        "{md}"
+    );
+    assert!(md.ends_with("<!-- reg-wiki:end -->\n"), "{md}");
+
+    // Idempotent: a second install changes nothing.
+    let installed = c.snapshot();
+    c.run(&["install", "--yes"])
+        .success()
+        .stdout(predicate::str::contains("already installed"));
+    assert_eq!(c.snapshot(), installed);
+
+    // Uninstall puts every file back exactly as it was.
+    c.run(&["uninstall", "--yes"]).success();
+    assert_eq!(c.snapshot(), before);
+    c.run(&["uninstall", "--yes"])
+        .success()
+        .stdout(predicate::str::contains("not installed"));
+}
+
+#[test]
+fn install_from_scratch_and_uninstall_leaves_nothing() {
+    let c = Claude::new();
+    let before = c.snapshot();
+    let v = {
+        let out = c
+            .cmd()
+            .args(["install", "--yes", "--stop-hook", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    assert_eq!(v["action"], "install");
+    assert!(v["changes"].as_array().unwrap().len() >= 5, "{v}");
+    let s = c.settings();
+    assert!(
+        s["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("reg-wiki hook stop")
+    );
+    assert_eq!(
+        s["permissions"]["allow"],
+        serde_json::json!(["Bash(reg-wiki:*)"])
+    );
+
+    // Re-running without --stop-hook keeps the Stop hook.
+    c.run(&["install", "--yes"])
+        .success()
+        .stdout(predicate::str::contains("already installed"));
+    assert!(c.settings()["hooks"].get("Stop").is_some());
+
+    c.run(&["uninstall", "--yes"]).success();
+    assert_eq!(c.snapshot(), before);
+}
+
+#[test]
+fn install_respects_existing_permissions_and_no_permissions() {
+    let c = Claude::new();
+    fs::write(
+        c.path("settings.json"),
+        r#"{"permissions":{"allow":["Bash(reg-wiki *)"]}}"#,
+    )
+    .unwrap();
+    c.run(&["install", "--yes"]).success();
+    // Already allowed in the newer spelling: not added twice…
+    assert_eq!(
+        c.settings()["permissions"]["allow"],
+        serde_json::json!(["Bash(reg-wiki *)"])
+    );
+    // …and not removed by uninstall, since install didn't add it.
+    c.run(&["uninstall", "--yes"]).success();
+    assert_eq!(
+        c.settings(),
+        serde_json::json!({"permissions":{"allow":["Bash(reg-wiki *)"]}})
+    );
+
+    let c = Claude::new();
+    c.run(&["install", "--yes", "--no-permissions"]).success();
+    assert!(c.settings().get("permissions").is_none());
+    // Adding it later and taking it away again.
+    c.run(&["install", "--yes"]).success();
+    assert_eq!(
+        c.settings()["permissions"]["allow"],
+        serde_json::json!(["Bash(reg-wiki:*)"])
+    );
+    c.run(&["install", "--yes", "--no-permissions"]).success();
+    assert!(c.settings().get("permissions").is_none());
+}
+
+#[test]
+fn install_refuses_bad_settings_and_asks_before_writing() {
+    let c = Claude::new();
+    fs::write(c.path("settings.json"), "{ not json").unwrap();
+    c.run(&["install", "--yes"])
+        .failure()
+        .stderr(predicate::str::contains("isn't valid JSON"));
+    assert_eq!(
+        fs::read_to_string(c.path("settings.json")).unwrap(),
+        "{ not json"
+    );
+
+    let c = Claude::new();
+    // No --yes and no terminal to ask on: refuse rather than guess.
+    c.cmd()
+        .arg("install")
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--yes"));
+    assert!(!c.path("settings.json").exists());
+    c.run(&["install", "--yes", "--target", "codex"])
+        .failure()
+        .stderr(predicate::str::contains("unknown target"));
+}
+
+#[test]
+fn install_honours_claude_config_dir_and_prints_config() {
+    let c = Claude::new();
+    let dir = c.home.join("elsewhere");
+    c.cmd()
+        .env("CLAUDE_CONFIG_DIR", &dir)
+        .args(["install", "--yes"])
+        .assert()
+        .success();
+    assert!(dir.join("skills/reg-wiki/SKILL.md").is_file());
+    assert!(dir.join("settings.json").is_file());
+    assert!(!c.path("settings.json").exists());
+
+    let out = c
+        .cmd()
+        .args(["install", "--print-config", "claude"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    for want in [
+        "\"UserPromptSubmit\"",
+        "Bash(reg-wiki:*)",
+        "<!-- reg-wiki:start -->",
+        "name: reg-wiki",
+    ] {
+        assert!(text.contains(want), "{want} missing from:\n{text}");
+    }
+    // Printing writes nothing.
+    assert!(!c.path("settings.json").exists());
+}
+
+#[test]
+fn installed_hook_commands_run() {
+    // The commands install writes are the ones the hook dispatcher accepts.
+    let c = Claude::new();
+    c.run(&["install", "--yes", "--stop-hook"]).success();
+    let s = c.settings();
+    for (event, groups) in s["hooks"].as_object().unwrap() {
+        let cmd = groups[0]["hooks"][0]["command"].as_str().unwrap();
+        let arg = cmd.rsplit(' ').next().unwrap();
+        let out = c
+            .cmd()
+            .args(["hook", arg])
+            .write_stdin(
+                c.env
+                    .input(serde_json::json!({ "hook_event_name": event }))
+                    .to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(
+            !String::from_utf8_lossy(&out.stderr).contains("unknown hook event"),
+            "{event}: {cmd}"
+        );
+    }
 }

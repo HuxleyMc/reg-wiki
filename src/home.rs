@@ -14,6 +14,8 @@ pub struct Home {
     pub db: PathBuf,
     pub config: PathBuf,
     pub lock: PathBuf,
+    /// Per-session state kept by the agent hooks.
+    pub sessions: PathBuf,
 }
 
 /// Folder for pages that are not tied to one project.
@@ -35,6 +37,7 @@ impl Home {
             db: root.join("reg.db"),
             config: root.join("config.toml"),
             lock: root.join("write.lock"),
+            sessions: root.join("sessions"),
         })
     }
 

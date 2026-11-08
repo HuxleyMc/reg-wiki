@@ -158,6 +158,93 @@ fn run(conn: &Connection, q: &Query, fts: &str) -> Result<Vec<Hit>> {
     Ok(hits)
 }
 
+/// Words common in prompts that say little about which page is relevant.
+const PROMPT_STOPWORDS: &[&str] = &[
+    "add", "also", "any", "but", "could", "did", "done", "fix", "get", "have", "just", "let",
+    "like", "look", "make", "need", "not", "now", "please", "run", "see", "some", "then", "there",
+    "they", "try", "use", "want", "will", "would", "your",
+];
+
+/// Pages relevant to an agent's prompt, best first, for the UserPromptSubmit hook.
+///
+/// Stricter than `query`, because most prompts should match nothing: words that occur
+/// in more than a third of the pages are ignored, a page must match at least one word in
+/// its title, summary or tags, and for prompts of three or more words it must match two.
+/// Project hubs are left out (the session start already lists them).
+pub fn relevant(
+    conn: &Connection,
+    text: &str,
+    scope: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PageRow>> {
+    let mut w: Vec<String> = words(text, 3)
+        .into_iter()
+        .filter(|w| !STOPWORDS.contains(&w.as_str()) && !PROMPT_STOPWORDS.contains(&w.as_str()))
+        .collect();
+    w.truncate(40);
+    if w.is_empty() {
+        return Ok(Vec::new());
+    }
+    let visible: HashMap<i64, PageRow> = db::pages_in_scope(conn, scope)?
+        .into_iter()
+        .filter(|p| p.slug.contains('/'))
+        .map(|p| (p.id, p))
+        .collect();
+    let n = visible.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    #[derive(Default)]
+    struct Score {
+        strong: usize,
+        any: usize,
+        weight: f64,
+    }
+    let mut scores: HashMap<i64, Score> = HashMap::new();
+    let mut st = conn.prepare("SELECT rowid FROM pages_fts WHERE pages_fts MATCH ?1")?;
+    let mut ids = |q: &str| -> Result<HashSet<i64>> {
+        let rows = st.query_map([q], |r| r.get::<_, i64>(0))?;
+        let mut out = HashSet::new();
+        for id in rows {
+            let id = id?;
+            if visible.contains_key(&id) {
+                out.insert(id);
+            }
+        }
+        Ok(out)
+    };
+    for word in &w {
+        let any = ids(&format!("\"{word}\""))?;
+        let df = any.len();
+        if df == 0 || (n >= 6 && df * 3 > n) {
+            continue;
+        }
+        let idf = ((n as f64 + 1.0) / df as f64).ln().max(0.1);
+        let strong = ids(&format!("{{title summary tags}} : \"{word}\""))?;
+        for id in any {
+            let s = scores.entry(id).or_default();
+            s.any += 1;
+            s.weight += idf;
+            if strong.contains(&id) {
+                s.strong += 1;
+                s.weight += 2.0 * idf;
+            }
+        }
+    }
+    let need = if w.len() <= 2 { 1 } else { 2 };
+    let mut keep: Vec<(f64, i64)> = scores
+        .iter()
+        .filter(|(_, s)| s.strong >= 1 && s.any >= need)
+        .map(|(id, s)| (s.weight, *id))
+        .collect();
+    keep.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    Ok(keep
+        .into_iter()
+        .take(limit)
+        .filter_map(|(_, id)| visible.get(&id).cloned())
+        .collect())
+}
+
 /// Rough token count: about four characters per token.
 pub fn tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)

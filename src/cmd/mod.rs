@@ -26,7 +26,16 @@ use crate::links::Resolution;
 use crate::{Cli, Command, ProjectCmd, git, util};
 
 pub fn run(cli: Cli) -> Result<ExitCode> {
-    let mut ctx = Ctx::open(&cli)?;
+    // These run before the index is opened: hooks must never fail the agent's session,
+    // and install/uninstall only touch the agent's config.
+    match &cli.cmd {
+        Command::Hook { event } => return Ok(crate::hooks::run(&cli, event)),
+        Command::Install(a) => return crate::install::install(&cli, a),
+        Command::Uninstall(a) => return crate::install::uninstall(&cli, a),
+        _ => {}
+    }
+    let cwd = std::env::current_dir()?;
+    let mut ctx = Ctx::open(&cli, cwd)?;
     match cli.cmd {
         Command::List { tag, refs } => list::run(&ctx, &tag, refs),
         Command::Read { slug } => read::run(&ctx, &slug),
@@ -72,6 +81,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Command::Stats => stats::run(&ctx),
         Command::Sync => sync::sync(&ctx),
         Command::Reindex => sync::reindex(&mut ctx),
+        Command::Hook { .. } | Command::Install(_) | Command::Uninstall(_) => unreachable!(),
     }
 }
 
@@ -90,14 +100,14 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    fn open(cli: &Cli) -> Result<Ctx> {
+    /// Open the index and find the current project from `cwd`.
+    pub fn open(cli: &Cli, cwd: PathBuf) -> Result<Ctx> {
         let home = Home::locate()?;
         home.ensure()?;
         let cfg = Config::load(&home.config)?;
         let mut conn = db::open(&home.db)?;
         let stats = reconcile::reconcile(&mut conn, &home.wiki, &cfg.projects())?;
         warn_all(&stats.warnings);
-        let cwd = std::env::current_dir()?;
         let current = match &cli.project {
             Some(p) => Some(p.clone()),
             None => crate::project::detect(&cfg.projects(), &cwd).map(|p| p.name),
@@ -208,12 +218,22 @@ impl Ctx {
         message: &str,
     ) -> Result<Option<String>> {
         util::atomic_write(&self.home.wiki.join(rel), text.as_bytes())?;
-        git::commit(
+        let commit = git::commit(
             &self.home.wiki,
             &[rel],
             &format!("{slug}: {message}"),
             &self.author(),
-        )
+        )?;
+        self.mark_session_write();
+        Ok(commit)
+    }
+
+    /// Tell the agent session we run in (if any) that it wrote to the wiki, so the
+    /// Stop hook doesn't ask it to record what it learned.
+    fn mark_session_write(&self) {
+        if let Some(id) = std::env::var_os(crate::hooks::SESSION_ENV) {
+            crate::hooks::state::mark_wrote(&self.home, &id.to_string_lossy());
+        }
     }
 
     pub fn event(&self, kind: &str, page: Option<&PageRow>) {
@@ -260,7 +280,9 @@ impl Ctx {
 
     /// Commit several wiki paths at once (moves, fixes).
     pub fn commit(&self, paths: &[&str], message: &str) -> Result<Option<String>> {
-        git::commit(&self.home.wiki, paths, message, &self.author())
+        let commit = git::commit(&self.home.wiki, paths, message, &self.author())?;
+        self.mark_session_write();
+        Ok(commit)
     }
 }
 

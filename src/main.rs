@@ -2,6 +2,8 @@ mod cmd;
 mod db;
 mod git;
 mod home;
+mod hooks;
+mod install;
 mod links;
 mod lint;
 mod page;
@@ -130,6 +132,46 @@ pub enum Command {
     Sync,
     /// Rebuild the index from scratch (usage events are kept).
     Reindex,
+    /// Run an agent hook (called by Claude Code; reads the hook's JSON on stdin).
+    ///
+    /// Events: session-start, user-prompt-submit, post-tool-use, stop. A hook never
+    /// fails: errors go to stderr and the exit code is 0. Does nothing when
+    /// REG_LIBRARIAN=1.
+    Hook { event: String },
+    /// Set up an agent to use the wiki: skill, hooks, permissions and a CLAUDE.md section.
+    Install(InstallArgs),
+    /// Remove everything `install` added.
+    Uninstall(UninstallArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct InstallArgs {
+    /// Agent to set up (only `claude` for now).
+    #[arg(long, default_value = "claude")]
+    pub target: String,
+    /// Don't ask for confirmation.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Don't add `Bash(reg-wiki:*)` to the allow list.
+    #[arg(long)]
+    pub no_permissions: bool,
+    /// Also add the Stop hook, which asks the agent to record what it learned when a
+    /// session changed code but wrote nothing to the wiki.
+    #[arg(long)]
+    pub stop_hook: bool,
+    /// Print the files and settings for this target instead of writing them.
+    #[arg(long, value_name = "TARGET")]
+    pub print_config: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct UninstallArgs {
+    /// Agent to remove the setup from (only `claude` for now).
+    #[arg(long, default_value = "claude")]
+    pub target: String,
+    /// Don't ask for confirmation.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Subcommand, Debug)]
