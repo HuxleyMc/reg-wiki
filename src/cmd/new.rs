@@ -35,17 +35,7 @@ pub fn run(ctx: &mut Ctx, a: Args) -> Result<ExitCode> {
                 .next()
                 .unwrap_or(&a.slug);
             let base = base.strip_suffix(".md").unwrap_or(base);
-            // A page's refs live next to it: `x/billing/index.md` → `x/billing/refs/`,
-            // and a flat `x/billing.md` → `x/billing/refs/` too.
-            let dir = match p.path.strip_suffix("index.md") {
-                Some(d) => d.trim_end_matches('/').to_string(),
-                None => p.path.trim_end_matches(".md").to_string(),
-            };
-            let rel = if dir.is_empty() {
-                format!("refs/{base}.md")
-            } else {
-                format!("{dir}/refs/{base}.md")
-            };
+            let rel = page::ref_path(&p.path, base);
             (format!("{}/{base}", p.slug), rel)
         }
         None => {

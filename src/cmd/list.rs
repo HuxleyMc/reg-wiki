@@ -15,11 +15,7 @@ pub fn run(ctx: &Ctx, tags: &[String], refs: bool) -> Result<ExitCode> {
     if let Some(proj) = ctx.scope() {
         args.push(proj.to_string());
         let n = args.len();
-        sql.push_str(&format!(
-            " AND (pr.name = ?{n} OR p.project_id IS NULL OR p.id IN (
-                SELECT pp.page_id FROM page_projects pp JOIN projects x ON x.id = pp.project_id
-                WHERE x.name = ?{n}))"
-        ));
+        sql.push_str(&format!(" AND {}", db::scope_sql(n)));
     }
     for t in tags {
         args.push(t.clone());

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 
 use crate::home::SHARED;
 use crate::page;
@@ -31,20 +31,41 @@ pub struct RawLink {
     pub kind: Kind,
 }
 
+/// A link and where its target is written in the body, so it can be rewritten.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub link: RawLink,
+    /// Byte range of the target as written: the part of a wikilink before `#`/`|`, or the
+    /// path of a `.md` link before `#`. `None` when it can't be located (reference links).
+    pub range: Option<Range<usize>>,
+}
+
 /// Every link in `body`, skipping code spans and code blocks. `src_rel` is the page's
 /// path relative to the wiki root, used to resolve relative `.md` links.
 pub fn extract(body: &str, src_rel: &str) -> Vec<RawLink> {
+    extract_spans(body, src_rel)
+        .into_iter()
+        .map(|s| s.link)
+        .collect()
+}
+
+pub fn extract_spans(body: &str, src_rel: &str) -> Vec<Span> {
     let mut code: Vec<Range<usize>> = Vec::new();
-    let mut out = Vec::new();
+    let mut md = Vec::new();
     for (ev, range) in Parser::new_ext(body, Options::all()).into_offset_iter() {
         match ev {
             Event::Code(_)
             | Event::Start(Tag::CodeBlock(_))
             | Event::InlineHtml(_)
             | Event::Html(_) => code.push(range),
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                if let Some(l) = md_link(&dest_url, src_rel) {
-                    out.push(l);
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            }) if !matches!(link_type, LinkType::WikiLink { .. }) => {
+                if let Some(link) = md_link(&dest_url, src_rel) {
+                    let range = md_url_range(body, range);
+                    md.push(Span { link, range });
                 }
             }
             _ => {}
@@ -52,7 +73,7 @@ pub fn extract(body: &str, src_rel: &str) -> Vec<RawLink> {
     }
 
     let in_code = |i: usize| code.iter().any(|r| r.contains(&i));
-    let mut wiki = Vec::new();
+    let mut out = Vec::new();
     let mut i = 0;
     while let Some(off) = body[i..].find("[[") {
         let start = i + off;
@@ -66,23 +87,42 @@ pub fn extract(body: &str, src_rel: &str) -> Vec<RawLink> {
             continue;
         }
         let target_part = inner.split('|').next().unwrap_or("");
-        let (target, heading) = match target_part.split_once('#') {
+        let (raw, heading) = match target_part.split_once('#') {
             Some((t, h)) => (t, Some(h.trim().to_string()).filter(|h| !h.is_empty())),
             None => (target_part, None),
         };
-        let target = target.trim();
-        let target = target.strip_suffix(".md").unwrap_or(target);
+        let lead = raw.len() - raw.trim_start().len();
+        let written = raw.trim();
+        let target = written.strip_suffix(".md").unwrap_or(written);
         if target.is_empty() {
             continue; // [[#Heading]]: a link within the page
         }
-        wiki.push(RawLink {
-            target: target.to_string(),
-            heading,
-            kind: Kind::Wiki,
+        let from = start + 2 + lead;
+        out.push(Span {
+            link: RawLink {
+                target: target.to_string(),
+                heading,
+                kind: Kind::Wiki,
+            },
+            range: Some(from..from + written.len()),
         });
     }
-    wiki.extend(out);
-    wiki
+    out.extend(md);
+    out
+}
+
+/// In `[text](path.md#h "title")`, the range of `path.md`.
+fn md_url_range(body: &str, link: Range<usize>) -> Option<Range<usize>> {
+    let src = &body[link.clone()];
+    let open = src.rfind("](")? + 2;
+    let rest = &src[open..];
+    let (skip, rest) = match rest.strip_prefix('<') {
+        Some(r) => (1, r),
+        None => (0, rest),
+    };
+    let len = rest.find(['#', ')', ' ', '>', '\n']).unwrap_or(rest.len());
+    let from = link.start + open + skip;
+    (len > 0).then_some(from..from + len)
 }
 
 fn md_link(dest: &str, src_rel: &str) -> Option<RawLink> {
@@ -96,7 +136,16 @@ fn md_link(dest: &str, src_rel: &str) -> Option<RawLink> {
     if !path.ends_with(".md") {
         return None;
     }
-    let path = path.replace("%20", " ");
+    let loc = page::locate(&join_rel(src_rel, &path.replace("%20", " "))?)?;
+    Some(RawLink {
+        target: loc.slug,
+        heading,
+        kind: Kind::Md,
+    })
+}
+
+/// Resolve `path` relative to the folder of the file `src_rel` (both wiki-relative).
+pub fn join_rel(src_rel: &str, path: &str) -> Option<String> {
     let mut parts: Vec<&str> = src_rel.split('/').collect();
     parts.pop(); // the source file itself
     for seg in path.split('/') {
@@ -108,12 +157,28 @@ fn md_link(dest: &str, src_rel: &str) -> Option<RawLink> {
             s => parts.push(s),
         }
     }
-    let loc = page::locate(&parts.join("/"))?;
-    Some(RawLink {
-        target: loc.slug,
-        heading,
-        kind: Kind::Md,
-    })
+    Some(parts.join("/"))
+}
+
+/// The relative path from the file `from_rel` to the file `to_rel` (both wiki-relative).
+pub fn relative_path(from_rel: &str, to_rel: &str) -> String {
+    let from: Vec<&str> = from_rel.split('/').collect();
+    let from = &from[..from.len() - 1];
+    let to: Vec<&str> = to_rel.split('/').collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<&str> = vec![".."; from.len() - common];
+    parts.extend(&to[common..]);
+    parts.join("/")
+}
+
+/// Replace byte ranges of `text`. Ranges must not overlap.
+pub fn apply_edits(text: &str, mut edits: Vec<(Range<usize>, String)>) -> String {
+    edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+    let mut out = text.to_string();
+    for (r, new) in edits {
+        out.replace_range(r, &new);
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,6 +270,21 @@ impl Resolver {
         }
         Resolution::Broken
     }
+
+    /// The shortest way to write a link to `want` from a page in `src_project`: the
+    /// basename if that resolves to it, then longer trailing paths, then the full slug.
+    pub fn shortest_link(&self, want: &str, src_project: Option<&str>) -> String {
+        let parts: Vec<&str> = want.split('/').collect();
+        for i in (0..parts.len()).rev() {
+            let cand = parts[i..].join("/");
+            if let Resolution::Found(s) = self.resolve(&cand, src_project)
+                && s.eq_ignore_ascii_case(want)
+            {
+                return cand;
+            }
+        }
+        want.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +310,48 @@ mod tests {
                 ("myapp/billing/stripe", Some("Retries"), Kind::Md),
             ]
         );
+    }
+
+    #[test]
+    fn spans_point_at_targets() {
+        let body = "a [[ billing#H|x ]] b [t](../x/y.md#z) c [[k.md]]";
+        let spans = extract_spans(body, "p/q.md");
+        let got: Vec<&str> = spans
+            .iter()
+            .map(|s| &body[s.range.clone().unwrap()])
+            .collect();
+        assert_eq!(got, vec!["billing", "k.md", "../x/y.md"]);
+        let edits = spans
+            .iter()
+            .map(|s| (s.range.clone().unwrap(), "N".to_string()))
+            .collect();
+        assert_eq!(apply_edits(body, edits), "a [[ N#H|x ]] b [t](N#z) c [[N]]");
+    }
+
+    #[test]
+    fn relative_paths() {
+        assert_eq!(relative_path("a/b.md", "a/c.md"), "c.md");
+        assert_eq!(relative_path("a/b/c.md", "a/d/e.md"), "../d/e.md");
+        assert_eq!(relative_path("x.md", "a/b.md"), "a/b.md");
+        assert_eq!(
+            join_rel("a/b/c.md", "../d/e.md").as_deref(),
+            Some("a/d/e.md")
+        );
+    }
+
+    #[test]
+    fn shortest_links() {
+        let r = Resolver::new([
+            ("myapp/billing".to_string(), Some("myapp".to_string())),
+            ("other/billing".to_string(), Some("other".to_string())),
+            ("myapp/x/stripe".to_string(), Some("myapp".to_string())),
+        ]);
+        assert_eq!(r.shortest_link("myapp/billing", Some("myapp")), "billing");
+        assert_eq!(
+            r.shortest_link("other/billing", Some("myapp")),
+            "other/billing"
+        );
+        assert_eq!(r.shortest_link("myapp/x/stripe", None), "stripe");
     }
 
     #[test]

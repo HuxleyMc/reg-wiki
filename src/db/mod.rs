@@ -12,9 +12,13 @@ use serde::Serialize;
 use crate::links::Resolver;
 use crate::util;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
-const SCHEMA: &str = "
+const FTS_TOKENIZE: &str = "tokenize = 'porter unicode61'";
+
+fn schema() -> String {
+    format!(
+        "
 CREATE TABLE projects(
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
@@ -66,7 +70,7 @@ CREATE TABLE sources(
   page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
   glob TEXT NOT NULL
 );
-CREATE VIRTUAL TABLE pages_fts USING fts5(title, summary, tags, body);
+CREATE VIRTUAL TABLE pages_fts USING fts5(title, summary, tags, body, {FTS_TOKENIZE});
 CREATE TABLE events(
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,
@@ -78,7 +82,9 @@ CREATE TABLE events(
   query TEXT,
   hits INTEGER
 );
-";
+"
+    )
+}
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -89,9 +95,17 @@ pub fn open(path: &Path) -> Result<Connection> {
     match version {
         0 => {
             conn.execute_batch(&format!(
-                "BEGIN; {SCHEMA} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;"
+                "BEGIN; {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
+                schema()
             ))?;
         }
+        // v2: stemming in the full-text index. Drop the pages so the next reconcile
+        // rebuilds them; events are kept.
+        1 => conn.execute_batch(&format!(
+            "BEGIN; DROP TABLE pages_fts; DELETE FROM pages;
+             CREATE VIRTUAL TABLE pages_fts USING fts5(title, summary, tags, body, {FTS_TOKENIZE});
+             PRAGMA user_version={SCHEMA_VERSION}; COMMIT;"
+        ))?,
         SCHEMA_VERSION => {}
         v => bail!(
             "{} has schema version {v}, but this reg-wiki knows {SCHEMA_VERSION}",
@@ -119,6 +133,24 @@ pub struct PageRow {
 pub const PAGE_COLS: &str =
     "p.id, p.slug, p.path, pr.name, p.is_ref, p.parent_slug, p.title, p.summary, p.status, p.hash";
 pub const PAGE_FROM: &str = "pages p LEFT JOIN projects pr ON pr.id = p.project_id";
+
+/// SQL condition (over `p` and `pr`) for pages visible from a project: its own pages,
+/// shared pages, and pages associated with it in frontmatter. `?{n}` is the project name.
+pub fn scope_sql(n: usize) -> String {
+    format!(
+        "(pr.name = ?{n} OR p.project_id IS NULL OR p.id IN (
+            SELECT pp.page_id FROM page_projects pp JOIN projects x ON x.id = pp.project_id
+            WHERE x.name = ?{n}))"
+    )
+}
+
+/// Pages visible in `scope` (`None` = every page), main pages and refs alike.
+pub fn pages_in_scope(conn: &Connection, scope: Option<&str>) -> Result<Vec<PageRow>> {
+    match scope {
+        Some(p) => pages_where(conn, &scope_sql(1), &[&p]),
+        None => pages_where(conn, "1=1", &[]),
+    }
+}
 
 pub fn page_row(r: &Row) -> rusqlite::Result<PageRow> {
     let hash: String = r.get(9)?;

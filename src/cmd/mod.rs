@@ -1,9 +1,15 @@
 //! Subcommands and the context they share.
 
+mod links;
+mod lint;
 mod list;
+mod mv;
 mod new;
 mod project;
+mod query;
 mod read;
+mod stats;
+mod status;
 mod sync;
 mod write;
 
@@ -52,6 +58,18 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             ProjectCmd::List => project::list(&ctx),
             ProjectCmd::Rm { name } => project::rm(&mut ctx, &name),
         },
+        Command::Query { search, limit, tag } => query::query(&ctx, &search.join(" "), limit, &tag),
+        Command::Context {
+            question,
+            budget,
+            candidates,
+        } => query::context(&ctx, &question.join(" "), budget.as_deref(), candidates),
+        Command::Links { slug } => links::links(&ctx, &slug),
+        Command::Backlinks { slug } => links::backlinks(&ctx, &slug),
+        Command::Mv { old, new, message } => mv::run(&mut ctx, &old, &new, message.as_deref()),
+        Command::Lint { fix } => lint::run(&mut ctx, fix),
+        Command::Status => status::run(&ctx),
+        Command::Stats => stats::run(&ctx),
         Command::Sync => sync::sync(&ctx),
         Command::Reindex => sync::reindex(&mut ctx),
     }
@@ -199,17 +217,50 @@ impl Ctx {
     }
 
     pub fn event(&self, kind: &str, page: Option<&PageRow>) {
+        self.log(kind, page, None, None);
+    }
+
+    /// A search, with how many pages it found; zero-hit queries show up as gaps in `stats`.
+    pub fn query_event(&self, query: &str, hits: usize) {
+        self.log("query", None, Some(query), Some(hits as i64));
+    }
+
+    fn log(&self, kind: &str, page: Option<&PageRow>, query: Option<&str>, hits: Option<i64>) {
         let e = db::Event {
             kind,
             page,
             project: self.current.as_deref(),
             agent: self.agent(),
-            query: None,
-            hits: None,
+            query,
+            hits,
         };
         if let Err(e) = db::log_event(&self.conn, e) {
             warn(&format!("could not record usage event: {e:#}"));
         }
+    }
+}
+
+impl Ctx {
+    /// Lint every page visible in the current scope.
+    pub fn lint(&self) -> Result<Vec<crate::lint::Issue>> {
+        let projects = self.cfg.projects();
+        let today = util::today();
+        let lines = self
+            .cfg
+            .int("limits", "main_page_lines")
+            .map_or(crate::lint::MAIN_PAGE_LINES, |n| n.max(1) as usize);
+        let opts = crate::lint::Opts {
+            scope: self.scope(),
+            main_page_lines: lines,
+            projects: &projects,
+            today: &today,
+        };
+        crate::lint::check(&self.conn, &self.home.wiki, &opts)
+    }
+
+    /// Commit several wiki paths at once (moves, fixes).
+    pub fn commit(&self, paths: &[&str], message: &str) -> Result<Option<String>> {
+        git::commit(&self.home.wiki, paths, message, &self.author())
     }
 }
 

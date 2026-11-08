@@ -66,6 +66,23 @@ pub fn commit(
     message: &str,
     author: &Author,
 ) -> Result<Option<String>> {
+    // Paths that no longer exist and were never committed (e.g. a hand-made page that
+    // was moved) would make git reject the whole pathspec.
+    let tracked = tracked(wiki, paths)?;
+    let paths: Vec<&str> = paths
+        .iter()
+        .copied()
+        .filter(|p| {
+            wiki.join(p).exists()
+                || tracked
+                    .iter()
+                    .any(|t| t == p || t.starts_with(&format!("{p}/")))
+        })
+        .collect();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let paths = &paths[..];
     let mut add = git(wiki);
     add.args(["add", "-A", "--"]).args(paths);
     run(add)?;
@@ -99,4 +116,58 @@ pub fn user_name() -> Option<String> {
         .ok()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !name.is_empty()).then_some(name)
+}
+
+fn tracked(repo: &Path, paths: &[&str]) -> Result<Vec<String>> {
+    let mut c = git(repo);
+    c.args(["ls-files", "-z", "--"]).args(paths);
+    let out = run(c)?;
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// The date (YYYY-MM-DD) files matching `globs` last changed in the repo at `root`:
+/// `today` if any are modified or untracked, else their last commit date.
+pub fn last_change(root: &Path, globs: &[String], today: &str) -> Result<Option<String>> {
+    let specs: Vec<String> = globs.iter().map(|g| format!(":(glob){g}")).collect();
+    let mut st = git(root);
+    st.args(["status", "--porcelain", "--"]).args(&specs);
+    if !run(st)?.stdout.is_empty() {
+        return Ok(Some(today.to_string()));
+    }
+    let mut log = git(root);
+    log.args(["log", "-1", "--format=%cs", "--"]).args(&specs);
+    let out = run(log)?;
+    let date = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!date.is_empty()).then_some(date))
+}
+
+/// Uncommitted changes in the wiki, as `git status --porcelain` lines.
+pub fn pending(wiki: &Path) -> Result<Vec<String>> {
+    let mut c = git(wiki);
+    c.args(["status", "--porcelain", "--untracked-files=all"]);
+    let out = run(c)?;
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.contains(".reg-tmp-"))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Commit authors since `since` (a git date such as `30.days`), limited to `paths`.
+pub fn authors_since(wiki: &Path, since: &str, paths: &[&str]) -> Result<Vec<String>> {
+    let mut c = git(wiki);
+    c.args(["log", &format!("--since={since}"), "--format=%an", "--"])
+        .args(paths);
+    let out = match c.output() {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(Vec::new()), // no commits yet
+    };
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
 }

@@ -3,6 +3,7 @@ mod db;
 mod git;
 mod home;
 mod links;
+mod lint;
 mod page;
 mod project;
 mod search;
@@ -76,6 +77,50 @@ pub enum Command {
         #[arg(short = 'm', long)]
         message: String,
     },
+    /// Full-text search: slug, summary and a snippet for each match, best first.
+    Query {
+        #[arg(required = true, num_args = 1..)]
+        search: Vec<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Only pages with this tag (repeatable; all must match).
+        #[arg(long)]
+        tag: Vec<String>,
+    },
+    /// The best-matching pages' bodies plus summaries of what they link to, in one
+    /// call, cut to a token budget.
+    Context {
+        #[arg(required = true, num_args = 1..)]
+        question: Vec<String>,
+        /// Token budget, e.g. 4k or 1500 (default: `[limits] context_budget`, else 4k).
+        #[arg(long)]
+        budget: Option<String>,
+        /// How many search hits to consider.
+        #[arg(long, default_value_t = 8)]
+        candidates: usize,
+    },
+    /// Pages a page links to.
+    Links { slug: String },
+    /// Pages that link to a page.
+    Backlinks { slug: String },
+    /// Rename a page (with its refs and subpages) and rewrite every link to it.
+    Mv {
+        old: String,
+        new: String,
+        /// Why; added to the commit message.
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
+    /// Check for broken or ambiguous links, orphans, bad summaries, long and stale pages.
+    Lint {
+        /// Fix what can be fixed safely, in one commit.
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Index freshness, uncommitted changes and lint counts.
+    Status,
+    /// Size, links, health, reading and writing activity, and gaps in the wiki.
+    Stats,
     /// Manage projects.
     Project {
         #[command(subcommand)]

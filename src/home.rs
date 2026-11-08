@@ -141,6 +141,11 @@ impl Config {
         aot.len() != before
     }
 
+    /// An integer setting such as `[limits] main_page_lines`.
+    pub fn int(&self, section: &str, key: &str) -> Option<i64> {
+        self.doc.get(section)?.get(key)?.as_integer()
+    }
+
     pub fn save(&self) -> Result<()> {
         util::atomic_write(&self.path, self.doc.to_string().as_bytes())
     }

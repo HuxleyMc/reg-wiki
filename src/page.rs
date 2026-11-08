@@ -256,6 +256,20 @@ pub fn locate(rel: &str) -> Option<Loc> {
     })
 }
 
+/// Where a ref named `base` of the page stored at `parent_path` lives: next to it, in
+/// `refs/` (`x/billing/index.md` and `x/billing.md` both → `x/billing/refs/<base>.md`).
+pub fn ref_path(parent_path: &str, base: &str) -> String {
+    let dir = match parent_path.strip_suffix("index.md") {
+        Some(d) => d.trim_end_matches('/').to_string(),
+        None => parent_path.trim_end_matches(".md").to_string(),
+    };
+    if dir.is_empty() {
+        format!("refs/{base}.md")
+    } else {
+        format!("{dir}/refs/{base}.md")
+    }
+}
+
 /// Reject slugs that can't be file paths or would break wikilink syntax.
 pub fn check_slug(slug: &str) -> Result<()> {
     if slug.is_empty() {
