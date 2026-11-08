@@ -1651,3 +1651,19 @@ fn installed_hook_commands_run() {
         );
     }
 }
+
+#[test]
+fn closed_stdout_is_not_a_panic() {
+    let env = seeded();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("reg-wiki"))
+        .current_dir(&env.repo)
+        .env("REG_HOME", &env.home)
+        .args(["read", "billing"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("panicked"));
+}

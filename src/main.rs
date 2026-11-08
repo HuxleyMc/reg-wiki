@@ -185,6 +185,11 @@ pub enum ProjectCmd {
 }
 
 fn main() -> ExitCode {
+    // Die quietly on a closed pipe (`reg-wiki list | head`) instead of panicking.
+    // SAFETY: called before any other thread exists; SIG_DFL is always a valid handler.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     match cmd::run(cli) {
         Ok(code) => code,
