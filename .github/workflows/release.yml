@@ -1,12 +1,16 @@
-# Push a tag like v0.2.0 (matching Cargo.toml's version) to publish a release.
+# Publish a release, either way:
+#   - push a tag like v0.2.0 that matches Cargo.toml's version, or
+#   - run this workflow by hand (Actions -> release -> Run workflow) on main;
+#     it tags the commit v<Cargo.toml version> itself.
 name: release
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 permissions:
@@ -14,18 +18,37 @@ permissions:
 
 jobs:
   verify:
-    name: check tag matches Cargo.toml
+    name: resolve version
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - shell: bash
+      - id: v
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
-            exit 1
+          tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$tag" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+              exit 1
+            fi
+          else
+            if [ "$GITHUB_REF_NAME" != main ]; then
+              echo "::error::Run releases from main, not $GITHUB_REF_NAME"
+              exit 1
+            fi
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::Release $tag already exists; bump the version in Cargo.toml first"
+              exit 1
+            fi
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag from $GITHUB_SHA"
 
   build:
     needs: verify
@@ -33,7 +56,7 @@ jobs:
 
   publish:
     name: publish GitHub release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -48,16 +71,18 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
           set -euo pipefail
           cd dist
           cat *.sha256 > SHA256SUMS
           cp ../install.sh .
           prerelease=()
-          case "$GITHUB_REF_NAME" in *-*) prerelease=(--prerelease) ;; esac
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          # --target creates the tag on this commit if it doesn't exist yet.
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --target "$GITHUB_SHA" \
             --generate-notes \
-            --verify-tag \
             "${prerelease[@]}" \
             ./*.tar.gz ./*.sha256 SHA256SUMS install.sh
