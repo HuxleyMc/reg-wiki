@@ -160,16 +160,19 @@ fn run(conn: &Connection, q: &Query, fts: &str) -> Result<Vec<Hit>> {
 
 /// Words common in prompts that say little about which page is relevant.
 const PROMPT_STOPWORDS: &[&str] = &[
-    "add", "also", "any", "but", "could", "did", "done", "fix", "get", "have", "just", "let",
-    "like", "look", "make", "need", "not", "now", "please", "run", "see", "some", "then", "there",
-    "they", "try", "use", "want", "will", "would", "your",
+    "add", "also", "any", "but", "change", "changes", "code", "could", "did", "done", "file",
+    "files", "fix", "function", "get", "have", "just", "let", "lib", "like", "line", "lines",
+    "look", "make", "need", "not", "now", "please", "run", "see", "some", "src", "then", "there",
+    "they", "try", "use", "want", "way", "will", "work", "would", "your",
 ];
 
 /// Pages relevant to an agent's prompt, best first, for the UserPromptSubmit hook.
 ///
 /// Stricter than `query`, because most prompts should match nothing: words that occur
 /// in more than a third of the pages are ignored, a page must match at least one word in
-/// its title, summary or tags, and for prompts of three or more words it must match two.
+/// its title, summary or tags (two of them for prompts of four or more words), and for
+/// prompts of three or more words it must match two words in all. In a small wiki the
+/// first rule can't apply, so the others carry the weight.
 /// Project hubs are left out (the session start already lists them).
 pub fn relevant(
     conn: &Connection,
@@ -231,10 +234,11 @@ pub fn relevant(
             }
         }
     }
-    let need = if w.len() <= 2 { 1 } else { 2 };
+    let need_any = if w.len() <= 2 { 1 } else { 2 };
+    let need_strong = if w.len() >= 4 { 2 } else { 1 };
     let mut keep: Vec<(f64, i64)> = scores
         .iter()
-        .filter(|(_, s)| s.strong >= 1 && s.any >= need)
+        .filter(|(_, s)| s.strong >= need_strong && s.any >= need_any)
         .map(|(id, s)| (s.weight, *id))
         .collect();
     keep.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));

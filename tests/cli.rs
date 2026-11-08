@@ -1159,6 +1159,18 @@ fn prompt_hook_suggests_matching_pages_once_and_is_quiet_otherwise() {
     // Unrelated prompts, slash commands and empty prompts print nothing.
     assert!(ask("rename the variable in main.rs to something clearer", "c").is_none());
     assert!(ask("/compact", "c").is_none());
+    // One shared generic word ("src", in billing's summary) is not relevance.
+    env.write(
+        "billing",
+        &fm(
+            "Billing",
+            "Read before touching src/billing, for invoices and plans.",
+            "",
+            "Returns whole invoices. [[auth]]",
+        ),
+    )
+    .success();
+    assert!(ask("Add a unit test for util::short in src/util.rs (a hash shorter than SHORT_HASH is returned whole)", "c").is_none());
     assert!(ask("", "c").is_none());
     // A one-word prompt matching a title is enough.
     assert!(context_of(&ask("login", "d")).contains("myapp/auth"));
