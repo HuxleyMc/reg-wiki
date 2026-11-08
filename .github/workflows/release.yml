@@ -1,4 +1,5 @@
-# Publish a release, either way:
+# Releases normally come from CI: a push to main whose Cargo.toml version has
+# no release yet publishes one (see ci.yml). This workflow is the manual path:
 #   - push a tag like v0.2.0 that matches Cargo.toml's version, or
 #   - run this workflow by hand (Actions -> release -> Run workflow) on main;
 #     it tags the commit v<Cargo.toml version> itself.
@@ -68,21 +69,6 @@ jobs:
           pattern: reg-wiki-*
           merge-multiple: true
       - name: Create release
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.verify.outputs.tag }}
-        run: |
-          set -euo pipefail
-          cd dist
-          cat *.sha256 > SHA256SUMS
-          cp ../install.sh .
-          prerelease=()
-          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
-          # --target creates the tag on this commit if it doesn't exist yet.
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --target "$GITHUB_SHA" \
-            --generate-notes \
-            "${prerelease[@]}" \
-            ./*.tar.gz ./*.sha256 SHA256SUMS install.sh
+        run: .github/scripts/publish-release.sh "${{ needs.verify.outputs.tag }}"

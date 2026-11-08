@@ -65,3 +65,40 @@ jobs:
     needs: [lint, test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/build.yml
+
+  # A push to main whose Cargo.toml version has no release yet publishes
+  # v<version> from the binaries just built. Bump the version to release.
+  release:
+    name: release (if version is new)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "$tag is already released; bump Cargo.toml's version to release again."
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.v.outputs.new == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: reg-wiki-*
+          merge-multiple: true
+      - if: steps.v.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/publish-release.sh "${{ steps.v.outputs.tag }}"

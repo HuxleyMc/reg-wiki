@@ -36,10 +36,11 @@ you can download as workflow artifacts.
 
 ### Releasing
 
-1. Bump `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, and commit to `main`.
-2. Either run the **release** workflow by hand on `main` (Actions → release → Run workflow),
-   which tags the commit `v<version>` itself, or tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+Bump `version` in `Cargo.toml` (run `cargo check` to update `Cargo.lock`) and push to `main`.
+Once CI passes, it sees that `v<version>` has no release yet and publishes one from
+the binaries it just built: tarballs, `.sha256` files, `SHA256SUMS` and `install.sh`.
+Pushes that don't change the version don't release. Versions with a suffix
+(`0.2.0-rc.1`) become pre-releases.
 
-`.github/workflows/release.yml` checks the version against `Cargo.toml`, builds
-every target, and publishes a GitHub release with tarballs, `.sha256` files,
-`SHA256SUMS` and `install.sh`. Tags with a suffix (`v0.2.0-rc.1`) become pre-releases.
+Pushing a `v*` tag, or running the **release** workflow by hand, also publishes a release
+(`.github/workflows/release.yml`).
