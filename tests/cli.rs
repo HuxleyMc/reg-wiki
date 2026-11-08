@@ -1705,3 +1705,129 @@ fn new_takes_sources_and_does_not_flag_the_hub_as_similar() {
         "{text}"
     );
 }
+
+/// The JSON embedded in a `view` page.
+fn view_data(html: &str) -> Value {
+    let start = html
+        .find(r#"<script id="data" type="application/json">"#)
+        .unwrap();
+    let rest = &html[start..];
+    let rest = &rest[rest.find('>').unwrap() + 1..];
+    serde_json::from_str(&rest[..rest.find("</script>").unwrap()]).unwrap()
+}
+
+#[test]
+fn view_writes_a_self_contained_graph_of_the_scope() {
+    let env = seeded();
+    env.write(
+        "_shared/rust",
+        &fm(
+            "Rust",
+            "Error handling across projects.",
+            "",
+            "Close </script> early? <b>no</b>",
+        ),
+    )
+    .success();
+
+    // Default location, with --no-open so the test doesn't start a browser.
+    let v = env.json(&["view", "--no-open"]);
+    let path = PathBuf::from(v["path"].as_str().unwrap());
+    assert_eq!(path, env.home.join("view.html"));
+    assert_eq!(v["opened"], false);
+    let html = fs::read_to_string(&path).unwrap();
+    assert!(
+        !html.contains("{{"),
+        "template placeholders left in the page"
+    );
+    assert!(
+        !html.contains("<script src"),
+        "the page must not load scripts"
+    );
+
+    let g = view_data(&html);
+    let nodes = g["nodes"].as_array().unwrap();
+    let slugs: Vec<&str> = nodes.iter().map(|n| n["slug"].as_str().unwrap()).collect();
+    assert!(
+        slugs.contains(&"myapp/billing") && slugs.contains(&"_shared/rust"),
+        "{slugs:?}"
+    );
+    let idx = |s: &str| slugs.iter().position(|x| *x == s).unwrap();
+    let billing = &nodes[idx("myapp/billing")];
+    assert_eq!(billing["project"], "myapp");
+    assert!(
+        billing["html"]
+            .as_str()
+            .unwrap()
+            .contains(r##"href="#p=myapp/auth""##)
+    );
+    let stripe = &nodes[idx("myapp/billing/stripe")];
+    assert_eq!(stripe["is_ref"], true);
+    assert_eq!(stripe["parent"], "myapp/billing");
+    assert!(nodes[idx("myapp")]["hub"].as_bool().unwrap());
+    let rust = nodes[idx("_shared/rust")]["html"].as_str().unwrap();
+    assert!(
+        rust.contains("&lt;/script&gt;") && !rust.contains("<b>"),
+        "{rust}"
+    );
+
+    // One edge per linked pair; the ref's edge to its parent is marked.
+    let edges = g["edges"].as_array().unwrap();
+    let has = |a: &str, b: &str, kind: &str| {
+        let (a, b) = (idx(a), idx(b));
+        edges.iter().any(|e| {
+            let (s, t) = (
+                e["s"].as_u64().unwrap() as usize,
+                e["t"].as_u64().unwrap() as usize,
+            );
+            ((s, t) == (a, b) || (s, t) == (b, a)) && e["kind"] == kind
+        })
+    };
+    assert!(has("myapp/billing", "myapp/auth", "link"));
+    assert!(has("myapp/billing", "myapp/billing/stripe", "ref"));
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|e| {
+                let p = [
+                    e["s"].as_u64().unwrap() as usize,
+                    e["t"].as_u64().unwrap() as usize,
+                ];
+                p.contains(&idx("myapp/billing")) && p.contains(&idx("myapp/auth"))
+            })
+            .count(),
+        1
+    );
+
+    // Another project's pages only show up with --all.
+    let other = env.repo.parent().unwrap().join("other");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    env.cmd_in(&other)
+        .args(["project", "add"])
+        .assert()
+        .success();
+    let mine = env.cmd().args(["view", "--out", "-"]).output().unwrap();
+    assert!(
+        !view_data(&String::from_utf8_lossy(&mine.stdout))["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["project"] == "other")
+    );
+    let out = env.repo.join("all.html");
+    env.cmd()
+        .args(["view", "--all", "--no-open", "-o", "all.html"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("all.html"));
+    let all = view_data(&fs::read_to_string(out).unwrap());
+    assert!(
+        all["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["slug"] == "other")
+    );
+    assert_eq!(all["scope"], Value::Null);
+}

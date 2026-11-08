@@ -125,7 +125,7 @@ fn md_url_range(body: &str, link: Range<usize>) -> Option<Range<usize>> {
     (len > 0).then_some(from..from + len)
 }
 
-fn md_link(dest: &str, src_rel: &str) -> Option<RawLink> {
+pub fn md_link(dest: &str, src_rel: &str) -> Option<RawLink> {
     if dest.contains("://") || dest.starts_with("mailto:") || dest.starts_with('/') {
         return None;
     }

@@ -11,6 +11,7 @@ mod read;
 mod stats;
 mod status;
 mod sync;
+mod view;
 mod write;
 
 use std::cell::OnceCell;
@@ -81,6 +82,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Command::Lint { fix } => lint::run(&mut ctx, fix),
         Command::Status => status::run(&ctx),
         Command::Stats => stats::run(&ctx),
+        Command::View { out, no_open } => view::run(&ctx, out, no_open),
         Command::Sync => sync::sync(&ctx),
         Command::Reindex => sync::reindex(&mut ctx),
         Command::Hook { .. } | Command::Install(_) | Command::Uninstall(_) => unreachable!(),

@@ -198,7 +198,7 @@ src/
   git.rs           # commit / log / diff / revert (shell out to git, or gix)
   search.rs        # query + context budgeting
   lint.rs  stats.rs
-  view/            # html template + vendored force-graph JS (include_str!)
+  view/            # html template, css and a small hand-written force layout (include_str!)
   hooks/           # one module per event, reads hook JSON from stdin
   install/         # per-target installers, embedded skill files
   librarian/       # ACP client, permission policy, prompts

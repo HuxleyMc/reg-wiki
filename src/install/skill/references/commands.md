@@ -52,6 +52,7 @@ Validation refuses a write without `title` or `summary`, with a summary over 200
 | `reg-wiki lint [--fix]` | Broken and ambiguous links, invalid frontmatter, orphans (pages nothing links to; hubs excepted), summaries too short to say when to read the page, missing dates, main pages over the line limit (`[limits] main_page_lines`), and stale pages (a `sources` file changed after the page's `updated`). Exits 1 if there are errors. `--fix` rewrites links that only differ in spelling (`[[Stripe Webhooks]]` → `[[stripe-webhooks]]`), fills in missing dates and marks stale pages `status: stale`, in one commit. |
 | `reg-wiki status` | Where the wiki is, the current project, index freshness, uncommitted (hand-edited) files and lint counts. |
 | `reg-wiki stats` | Pages, refs, words, links, orphans, broken and stale pages, most linked and most read pages, recent writers, and searches that found nothing (gaps worth filling). |
+| `reg-wiki view [--out PATH] [--no-open]` | Writes a self-contained HTML graph (default `view.html` in `$REG_HOME`) and opens it in the browser: nodes coloured by project and sized by links, refs as rings; click one to read the page with its refs, links and backlinks. Search box, project, tag and refs filters. `--out -` prints the HTML. For people; agents rarely need it. |
 | `reg-wiki sync` | Bring the index up to date now (every command does this anyway). |
 | `reg-wiki reindex` | Rebuild the index from the files. Usage events are kept. |
 

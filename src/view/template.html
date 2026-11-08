@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+{{STYLE}}
+</style>
+</head>
+<body>
+<header class="bar">
+  <strong class="brand">reg-wiki</strong>
+  <span id="scope" class="muted"></span>
+  <input id="search" type="search" placeholder="Search titles, summaries, tags…" autocomplete="off" aria-label="Search pages">
+  <select id="project" aria-label="Project"><option value="">All projects</option></select>
+  <select id="tag" aria-label="Tag"><option value="">All tags</option></select>
+  <label class="check"><input id="refs" type="checkbox" checked> refs</label>
+  <span id="counts" class="muted"></span>
+</header>
+<main>
+  <div id="stage">
+    <canvas id="graph" aria-label="Graph of wiki pages"></canvas>
+    <ul id="legend"></ul>
+    <p id="hint" class="muted">Drag to pan · scroll to zoom · click a page to read it</p>
+  </div>
+  <aside id="panel" hidden>
+    <button id="close" type="button" aria-label="Close">×</button>
+    <div id="page"></div>
+  </aside>
+</main>
+<script id="data" type="application/json">{{DATA}}</script>
+<script>
+{{SCRIPT}}
+</script>
+</body>
+</html>

@@ -10,6 +10,7 @@ mod page;
 mod project;
 mod search;
 mod util;
+mod view;
 
 use std::process::ExitCode;
 
@@ -127,6 +128,19 @@ pub enum Command {
     Status,
     /// Size, links, health, reading and writing activity, and gaps in the wiki.
     Stats,
+    /// Write an HTML graph of the wiki and open it in the browser.
+    ///
+    /// Nodes are coloured by project and sized by links; click one to read the page
+    /// with its refs and backlinks. Covers the current project plus `_shared`, or
+    /// every page with `--all`.
+    View {
+        /// Where to write the page (default: view.html in REG_HOME); `-` for stdout.
+        #[arg(long, short = 'o', value_name = "PATH")]
+        out: Option<std::path::PathBuf>,
+        /// Write the file but don't open a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Manage projects.
     Project {
         #[command(subcommand)]
