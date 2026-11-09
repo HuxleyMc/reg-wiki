@@ -196,8 +196,8 @@ pub struct InstallArgs {
     /// in Gemini CLI.
     #[arg(long)]
     pub no_permissions: bool,
-    /// Also add the Stop hook, which asks the agent to record what it learned when a
-    /// session changed code but wrote nothing to the wiki.
+    /// Also add the Stop hook, which asks the agent once whether anything is worth
+    /// recording when a session changed code but wrote nothing to the wiki.
     #[arg(long)]
     pub stop_hook: bool,
     /// Don't set up the librarian (or turn it off if it was).

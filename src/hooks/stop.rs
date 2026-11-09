@@ -1,5 +1,5 @@
 //! Stop (opt-in): if the session edited code in a registered project and wrote nothing to
-//! the wiki, ask the agent once to record what it learned.
+//! the wiki, ask the agent once whether anything is worth recording. Saying no is fine.
 
 use anyhow::Result;
 use rusqlite::OptionalExtension;
@@ -42,18 +42,16 @@ pub fn run(ctx: &Ctx, input: &Input) -> Result<Option<Output>> {
         files.push(format!("{} more", n - files.len()));
     }
     let ai = if crate::librarian::Settings::load(&ctx.cfg).enabled {
-        " Or send rough notes to `reg-wiki ai record` (on stdin) and the librarian will turn \
-         them into page edits."
+        " (or pipe rough notes to `reg-wiki ai record`)"
     } else {
         ""
     };
     Ok(Some(Output::Block(format!(
-        "reg-wiki: this session changed {n} file(s) ({}) but recorded nothing in the wiki. \
-         If you learned something a later session would want (a decision and its reason, a \
-         gotcha, how a part of the code fits together), record it now: update the closest \
-         page with `reg-wiki read <slug>` then `reg-wiki write <slug> --base <hash> -m \"why\"`, \
-         or add one with `reg-wiki new`. Search first with `reg-wiki query`.{ai} If nothing \
-         is worth keeping, just finish; this won't be asked again in this session.",
+        "reg-wiki: this session changed {n} file(s) ({}) and wrote nothing to the wiki, which \
+         is usually fine. Only if you learned something a later session would struggle to \
+         find out again (a decision and its reason, a gotcha, notes on unfinished work), \
+         add it to the closest page with `reg-wiki read <slug>` and `reg-wiki write <slug> \
+         --base <hash> -m \"why\"`{ai}. Otherwise just finish; you won't be asked again.",
         files.join(", ")
     ))))
 }
