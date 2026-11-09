@@ -11,6 +11,7 @@ mod page;
 mod project;
 mod search;
 mod serve;
+mod update;
 mod util;
 mod view;
 
@@ -179,6 +180,8 @@ pub enum Command {
     Install(InstallArgs),
     /// Remove everything `install` added.
     Uninstall(UninstallArgs),
+    /// Update reg-wiki to the latest release (or `--version`), checking its SHA-256.
+    Update(update::UpdateArgs),
 }
 
 #[derive(clap::Args, Debug)]

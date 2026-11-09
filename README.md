@@ -17,7 +17,16 @@ Then run `reg-wiki install` to wire it into Claude Code, or
 through its MCP server (`reg-wiki serve --mcp`). `reg-wiki ai schedule weekly` has the
 librarian tend the wiki on a schedule.
 
-**Update:** run the same command again. It does nothing if you're already on the latest release.
+**Update:** `reg-wiki update` (or run the install command again). Both check the
+SHA-256 and do nothing if you're already on the latest release.
+
+```sh
+reg-wiki update --check           # is there a newer release?
+reg-wiki update --version v0.2.0  # move to a specific release (older is fine)
+```
+
+`reg-wiki update` needs `curl` or `wget`, and `tar`. If the binary lives somewhere you
+can't write to, run it with `sudo`.
 
 Options (pass after `sh -s --`):
 

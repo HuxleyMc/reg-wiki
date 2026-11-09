@@ -110,6 +110,7 @@ sources: [src/billing/**]  # relative to the project root
 |---|---|
 | `reg-wiki install [--target claude,codex,...] [--yes]` | Interactive setup: wires agents, sets up the librarian (on/off, which agent, which model). |
 | `reg-wiki uninstall [--target]` | Removes everything `install` added. |
+| `reg-wiki update [--check] [--version TAG] [--force]` | Replaces the binary with the latest (or a given) GitHub release, after checking its SHA-256. |
 | `reg-wiki project add\|list\|rm` | Manages projects. |
 | `reg-wiki status` | Index freshness, pending changes, lint counts. |
 | `reg-wiki stats [--project\|--all]` | Pages, refs, words, characters, bytes, links, orphans, broken and stale pages, most-linked and most-read pages, recent writes by agent, **queries with no results** (gaps in the wiki), and growth over time. |

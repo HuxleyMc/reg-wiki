@@ -2759,3 +2759,162 @@ fn schedule_adds_and_removes_one_crontab_entry() {
     assert_eq!(fs::read_to_string(&tab).unwrap(), "0 * * * * backup\n");
     run(&["ai", "schedule", "daily", "--at", "25:00"]).failure();
 }
+
+// --- update --------------------------------------------------------------
+
+/// A copy of the built binary (so the real one is never replaced) plus a fake
+/// release `tag` under file:// whose "binary" is a script printing `version`.
+struct Release {
+    _tmp: TempDir,
+    bin: PathBuf,
+    base: String,
+    dl: PathBuf,
+    asset: String,
+}
+
+impl Release {
+    fn new(tag: &str, version: &str) -> Release {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join("reg-wiki");
+        fs::copy(assert_cmd::cargo::cargo_bin("reg-wiki"), &bin).unwrap();
+
+        let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+            ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+            ("macos", "x86_64") => "x86_64-apple-darwin",
+            ("macos", "aarch64") => "aarch64-apple-darwin",
+            other => panic!("no release target for {other:?}"),
+        };
+        let asset = format!("reg-wiki-{triple}.tar.gz");
+        let stage = tmp.path().join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let script = stage.join("reg-wiki");
+        fs::write(&script, format!("#!/bin/sh\necho 'reg-wiki {version}'\n")).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let dl = tmp.path().join("releases/download").join(tag);
+        fs::create_dir_all(&dl).unwrap();
+        let ok = Std::new("tar")
+            .arg("-czf")
+            .arg(dl.join(&asset))
+            .arg("-C")
+            .arg(&stage)
+            .arg("reg-wiki")
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let rel = Release {
+            base: format!("file://{}", tmp.path().join("releases").display()),
+            _tmp: tmp,
+            bin,
+            dl,
+            asset,
+        };
+        rel.write_sum(None);
+        rel
+    }
+
+    /// Write the .sha256 file: the real digest, or `bad` instead.
+    fn write_sum(&self, bad: Option<&str>) {
+        let bytes = fs::read(self.dl.join(&self.asset)).unwrap();
+        let digest = match bad {
+            Some(b) => b.to_string(),
+            None => {
+                use sha2::Digest;
+                sha2::Sha256::digest(&bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            }
+        };
+        fs::write(
+            self.dl.join(format!("{}.sha256", self.asset)),
+            format!("{digest}  {}\n", self.asset),
+        )
+        .unwrap();
+    }
+
+    fn update(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        Command::new(&self.bin)
+            .arg("update")
+            .args(args)
+            .env("REG_WIKI_RELEASES_URL", &self.base)
+            .assert()
+    }
+
+    fn version(&self) -> String {
+        let out = Std::new(&self.bin).arg("--version").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+}
+
+#[test]
+fn update_installs_a_verified_release_over_the_binary() {
+    let rel = Release::new("v9.9.9", "9.9.9");
+    rel.update(&["--check", "--version", "9.9.9"])
+        .success()
+        .stdout(predicate::str::contains("update available"));
+    // --check changes nothing.
+    assert_ne!(rel.version(), "reg-wiki 9.9.9");
+
+    rel.update(&["--version", "v9.9.9"])
+        .success()
+        .stdout(predicate::str::contains("-> v9.9.9"));
+    assert_eq!(rel.version(), "reg-wiki 9.9.9");
+    // No staging file is left behind.
+    let leftovers: Vec<_> = fs::read_dir(rel.bin.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(leftovers, vec![std::ffi::OsString::from("reg-wiki")]);
+}
+
+#[test]
+fn update_refuses_a_bad_checksum_and_keeps_the_binary() {
+    let rel = Release::new("v9.9.9", "9.9.9");
+    rel.write_sum(Some(&"0".repeat(64)));
+    let before = fs::read(&rel.bin).unwrap();
+    rel.update(&["--version", "v9.9.9"])
+        .failure()
+        .stderr(predicate::str::contains("checksum mismatch"));
+    assert_eq!(fs::read(&rel.bin).unwrap(), before);
+}
+
+#[test]
+fn update_reports_a_missing_release() {
+    let rel = Release::new("v9.9.9", "9.9.9");
+    rel.update(&["--version", "v8.8.8"])
+        .failure()
+        .stderr(predicate::str::contains("download failed"));
+}
+
+#[test]
+fn update_to_the_installed_version_is_a_no_op_unless_forced() {
+    let current = env!("CARGO_PKG_VERSION");
+    let rel = Release::new(&format!("v{current}"), "forced");
+    rel.update(&["--version", current])
+        .success()
+        .stdout(predicate::str::contains("already on"));
+    assert_ne!(rel.version(), "reg-wiki forced");
+    rel.update(&["--version", current, "--force"]).success();
+    assert_eq!(rel.version(), "reg-wiki forced");
+}
+
+#[test]
+fn update_check_json() {
+    let rel = Release::new("v9.9.9", "9.9.9");
+    let out = Command::new(&rel.bin)
+        .args(["update", "--check", "--version", "v9.9.9", "--json"])
+        .env("REG_WIKI_RELEASES_URL", &rel.base)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["latest"], "v9.9.9");
+    assert_eq!(v["update_available"], true);
+    assert_eq!(v["updated"], false);
+}

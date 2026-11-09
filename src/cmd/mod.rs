@@ -30,12 +30,13 @@ use crate::{AiCmd, Cli, Command, ProjectCmd, git, util};
 
 pub fn run(cli: Cli) -> Result<ExitCode> {
     // These run before the index is opened: hooks must never fail the agent's session,
-    // and install/uninstall only touch the agent's config.
+    // install/uninstall only touch the agent's config, and update only the binary.
     match &cli.cmd {
         Command::Hook { event } => return Ok(crate::hooks::run(&cli, event)),
         Command::Install(a) => return crate::install::install(&cli, a),
         Command::Uninstall(a) => return crate::install::uninstall(&cli, a),
         Command::Serve { .. } => return crate::serve::run(&cli),
+        Command::Update(a) => return crate::update::run(&cli, a),
         _ => {}
     }
     let cwd = std::env::current_dir()?;
@@ -98,7 +99,8 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Command::Hook { .. }
         | Command::Install(_)
         | Command::Uninstall(_)
-        | Command::Serve { .. } => unreachable!(),
+        | Command::Serve { .. }
+        | Command::Update(_) => unreachable!(),
     }
 }
 
