@@ -10,6 +10,7 @@ mod lint;
 mod page;
 mod project;
 mod search;
+mod serve;
 mod util;
 mod view;
 
@@ -157,13 +158,24 @@ pub enum Command {
     Sync,
     /// Rebuild the index from scratch (usage events are kept).
     Reindex,
-    /// Run an agent hook (called by Claude Code; reads the hook's JSON on stdin).
+    /// Run an agent hook (called by Claude Code or Gemini CLI; reads the hook's JSON on
+    /// stdin).
     ///
-    /// Events: session-start, user-prompt-submit, post-tool-use, stop. A hook never
+    /// Events: session-start, user-prompt-submit, post-tool-use, stop, and Gemini CLI's
+    /// before-agent and after-tool. A hook never
     /// fails: errors go to stderr and the exit code is 0. Does nothing when
     /// REG_LIBRARIAN=1.
     Hook { event: String },
-    /// Set up an agent to use the wiki: skill, hooks, permissions and a CLAUDE.md section.
+    /// Serve the wiki to MCP clients over stdio (`--mcp`), for agents that reach tools
+    /// through MCP: Codex, Cursor, Gemini CLI. `reg-wiki install` sets this up.
+    Serve {
+        /// Speak the Model Context Protocol on stdin/stdout.
+        #[arg(long, required = true)]
+        mcp: bool,
+    },
+    /// Set up agents to use the wiki: Claude Code gets a skill, hooks, permissions and a
+    /// CLAUDE.md section; Codex, Cursor and Gemini CLI get the MCP server and what else
+    /// each supports.
     Install(InstallArgs),
     /// Remove everything `install` added.
     Uninstall(UninstallArgs),
@@ -171,13 +183,14 @@ pub enum Command {
 
 #[derive(clap::Args, Debug)]
 pub struct InstallArgs {
-    /// Agent to set up (only `claude` for now).
+    /// Agents to set up, comma-separated: claude, codex, cursor, gemini.
     #[arg(long, default_value = "claude")]
     pub target: String,
     /// Don't ask for confirmation.
     #[arg(short = 'y', long)]
     pub yes: bool,
-    /// Don't add `Bash(reg-wiki:*)` to the allow list.
+    /// Don't add `Bash(reg-wiki:*)` to Claude Code's allow list, or trust the MCP server
+    /// in Gemini CLI.
     #[arg(long)]
     pub no_permissions: bool,
     /// Also add the Stop hook, which asks the agent to record what it learned when a
@@ -200,9 +213,9 @@ pub struct InstallArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct UninstallArgs {
-    /// Agent to remove the setup from (only `claude` for now).
-    #[arg(long, default_value = "claude")]
-    pub target: String,
+    /// Agents to remove the setup from, comma-separated (default: every agent).
+    #[arg(long)]
+    pub target: Option<String>,
     /// Don't ask for confirmation.
     #[arg(short = 'y', long)]
     pub yes: bool,
@@ -238,6 +251,16 @@ pub enum AiCmd {
     },
     /// List the models the librarian's agent offers.
     Models,
+    /// Run `ai tend` on a schedule (a crontab entry), over every project. Without an
+    /// argument, shows the current schedule.
+    Schedule {
+        /// daily, weekly (Sundays) or off.
+        #[arg(value_parser = ["daily", "weekly", "off"])]
+        when: Option<String>,
+        /// Local time to run at, HH:MM (default 03:17).
+        #[arg(long, value_name = "HH:MM")]
+        at: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

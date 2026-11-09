@@ -1,8 +1,14 @@
-//! `reg-wiki install` / `uninstall`: wire an agent up to the wiki. Only Claude Code for
-//! now; other targets would get their own module with the same shape.
+//! `reg-wiki install` / `uninstall`: wire agents up to the wiki. Claude Code gets the
+//! skill, hooks and a CLAUDE.md section and uses the CLI; Codex, Cursor and Gemini CLI
+//! reach the wiki through the MCP server (`reg-wiki serve --mcp`), plus whatever
+//! instructions file and hooks each one has.
 
 mod claude;
+mod codex;
+mod cursor;
+mod gemini;
 mod librarian;
+mod shared;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -25,39 +31,106 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
     ),
 ];
 
-const TARGETS: &[&str] = &["claude"];
+pub const TARGETS: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("codex", "Codex"),
+    ("cursor", "Cursor"),
+    ("gemini", "Gemini CLI"),
+];
 
-fn check_target(t: &str) -> Result<()> {
-    if !TARGETS.contains(&t) {
-        bail!(
-            "unknown target `{t}`; supported: {} (codex, cursor and gemini are planned)",
-            TARGETS.join(", ")
-        );
+/// `claude,codex` → the targets, checked, without repeats.
+fn targets(spec: &str) -> Result<Vec<&'static str>> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for t in spec.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        let t = t.to_lowercase();
+        let Some((name, _)) = TARGETS
+            .iter()
+            .find(|(n, _)| *n == t || (t == "gemini-cli" && *n == "gemini"))
+        else {
+            bail!(
+                "unknown target `{t}`; supported: {}",
+                TARGETS
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
+        if !out.contains(name) {
+            out.push(name);
+        }
     }
-    Ok(())
+    if out.is_empty() {
+        bail!("no target given");
+    }
+    Ok(out)
+}
+
+fn label(target: &str) -> &'static str {
+    TARGETS
+        .iter()
+        .find(|(n, _)| *n == target)
+        .map_or("the agent", |(_, l)| l)
+}
+
+fn labels(ts: &[&str]) -> String {
+    ts.iter().map(|t| label(t)).collect::<Vec<_>>().join(", ")
 }
 
 pub fn install(cli: &Cli, a: &InstallArgs) -> Result<ExitCode> {
     if let Some(t) = &a.print_config {
-        check_target(t)?;
-        claude::print_config(cli.json, a)?;
+        let ts = targets(t)?;
+        if ts.len() != 1 {
+            bail!("--print-config takes one target");
+        }
+        match ts[0] {
+            "claude" => claude::print_config(cli.json, a)?,
+            "codex" => codex::print_config(cli.json)?,
+            "cursor" => cursor::print_config(cli.json)?,
+            _ => gemini::print_config(cli.json, a)?,
+        }
         return Ok(ExitCode::SUCCESS);
     }
-    check_target(&a.target)?;
-    let mut plan = claude::plan_install(a)?;
+    let ts = targets(&a.target)?;
+    let mut plan = Plan::default();
+    for t in &ts {
+        plan.merge(match *t {
+            "claude" => claude::plan_install(a)?,
+            "codex" => codex::plan_install()?,
+            "cursor" => cursor::plan_install()?,
+            _ => gemini::plan_install(a)?,
+        });
+    }
     let interactive = !a.yes && std::io::stdin().is_terminal();
     let mut notes = Vec::new();
     if let Some(c) = librarian::plan(a, interactive, &mut notes)? {
         plan.changes.push(c);
     }
     plan.notes.extend(notes);
-    apply(cli.json, a.yes, "install", plan)
+    apply(cli.json, a.yes, "install", &labels(&ts), plan)
 }
 
 pub fn uninstall(cli: &Cli, a: &UninstallArgs) -> Result<ExitCode> {
-    check_target(&a.target)?;
-    let plan = claude::plan_uninstall()?;
-    apply(cli.json, a.yes, "uninstall", plan)
+    // Without --target, every agent: each plan is empty where nothing was installed.
+    let ts = match &a.target {
+        Some(t) => targets(t)?,
+        None => TARGETS.iter().map(|(n, _)| *n).collect(),
+    };
+    let mut plan = Plan::default();
+    for t in &ts {
+        plan.merge(match *t {
+            "claude" => claude::plan_uninstall()?,
+            "codex" => codex::plan_uninstall()?,
+            "cursor" => cursor::plan_uninstall()?,
+            _ => gemini::plan_uninstall()?,
+        });
+    }
+    let who = if a.target.is_some() {
+        labels(&ts)
+    } else {
+        "any agent".to_string()
+    };
+    apply(cli.json, a.yes, "uninstall", &who, plan)
 }
 
 /// One file to write (`Some`) or delete (`None`), and why.
@@ -67,6 +140,7 @@ pub struct Change {
     pub what: String,
 }
 
+#[derive(Default)]
 pub struct Plan {
     pub changes: Vec<Change>,
     /// Directories to remove afterwards if they're empty, deepest first.
@@ -75,7 +149,22 @@ pub struct Plan {
     pub hook_command: Option<String>,
 }
 
-fn apply(json: bool, yes: bool, verb: &str, plan: Plan) -> Result<ExitCode> {
+impl Plan {
+    fn merge(&mut self, other: Plan) {
+        self.changes.extend(other.changes);
+        self.prune_dirs.extend(other.prune_dirs);
+        for n in other.notes {
+            if !self.notes.contains(&n) {
+                self.notes.push(n);
+            }
+        }
+        if self.hook_command.is_none() {
+            self.hook_command = other.hook_command;
+        }
+    }
+}
+
+fn apply(json: bool, yes: bool, verb: &str, who: &str, plan: Plan) -> Result<ExitCode> {
     if plan.changes.is_empty() {
         if json {
             crate::cmd::print_json(&serde_json::json!({
@@ -88,7 +177,7 @@ fn apply(json: bool, yes: bool, verb: &str, plan: Plan) -> Result<ExitCode> {
             } else {
                 "not installed"
             };
-            println!("reg-wiki: {state} for Claude Code; nothing to change");
+            println!("reg-wiki: {state} for {who}; nothing to change");
             for n in &plan.notes {
                 println!("note: {n}");
             }
@@ -99,7 +188,7 @@ fn apply(json: bool, yes: bool, verb: &str, plan: Plan) -> Result<ExitCode> {
     if !yes {
         if !std::io::stdin().is_terminal() {
             bail!(
-                "{verb} would change files in ~/.claude and ~/.reg; run it with --yes to go ahead without asking"
+                "{verb} would change {who}'s settings and ~/.reg; run it with --yes to go ahead without asking"
             );
         }
         eprintln!("reg-wiki {verb} will:");

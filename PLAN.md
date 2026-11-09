@@ -133,7 +133,15 @@ sources: [src/billing/**]  # relative to the project root
 4. **Marker-fenced section** in `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`, as codegraph does. `uninstall` removes it cleanly.
 5. `--print-config <target>` prints the snippets so they can be set up by hand.
 
-Other targets (codex, cursor, gemini, opencode) follow the same pattern, each with its own file locations. An MCP server (`reg-wiki serve --mcp`) is possible later; the CLI with a skill covers the need for now.
+### Other agents (MCP)
+
+Codex, Cursor and Gemini CLI reach the wiki through an MCP server, `reg-wiki serve --mcp` (`src/serve.rs`), rather than the shell. Codex's sandbox lets commands write only inside the workspace, and every `reg-wiki` command updates the index in `~/.reg`; MCP servers run outside the sandbox. An editor started from the desktop may not have `~/.local/bin` on PATH, so the server entry names the binary by absolute path.
+
+- **Server:** newline-delimited JSON-RPC on stdio, hand-written like the ACP client. Each tool call runs `reg-wiki` itself with the matching command and returns its text output, so the server can't drift from the CLI and a failed call can't kill it. Tools: `wiki_context`, `wiki_query`, `wiki_list`, `wiki_read`, `wiki_links`, `wiki_write`, `wiki_new`, `wiki_lint`, `wiki_ask` (`ai query`) and `wiki_record` (`ai record`); each also takes `project` and `all`. The `initialize` reply's `instructions` carry the core loop and the page-writing rules, standing in for the skill. The current project comes from the client's first `file://` root (`roots/list`) when it offers roots, else from the server's cwd. The author of writes comes from `clientInfo.name` (`codex-mcp-client` → `codex`) unless `REG_AGENT` is set. With `REG_LIBRARIAN=1` it lists no tools.
+- **Codex:** `[mcp_servers.reg-wiki]` in `$CODEX_HOME/config.toml` (default `~/.codex`; edited with `toml_edit` so comments and layout survive; `tool_timeout_sec = 120` for `ai` calls), and the marker-fenced section in `AGENTS.md`. No hooks.
+- **Cursor:** `mcpServers.reg-wiki` in `~/.cursor/mcp.json`. Cursor has no global rules file, so the server's instructions are all it gets.
+- **Gemini CLI:** in `~/.gemini/settings.json`, `mcpServers.reg-wiki` (with `trust: true` unless `--no-permissions`, the counterpart of Claude's allow rule) and hooks: `SessionStart`, `BeforeAgent` (`reg-wiki hook before-agent`, the prompt hook) and `AfterTool` on `write_file|replace` (`reg-wiki hook after-tool`). The hook output has the same shape as Claude Code's and carries Gemini's event name. The marker-fenced section goes in `~/.gemini/GEMINI.md`.
+- `install --target claude,codex,…` takes several targets at once; `uninstall` without `--target` covers every agent. What install created (files, Gemini's trust) is recorded in `$REG_HOME/installs/<target>.json`, so uninstall deletes only files it created and only once they're empty.
 
 ## Librarian agent (ACP)
 
@@ -161,6 +169,10 @@ main session ◄── answer + sources (slug — summary) + gaps
 ### `reg-wiki ai record` (stdin notes) and `reg-wiki ai tend`
 
 These use the same arrangement. `reg-wiki` finds the related pages and sends them with the notes or the lint report. The librarian returns **proposed page contents** (full Markdown for each slug it wants to create or change, plus a commit message). `reg-wiki` checks them the same way as `reg-wiki write` (frontmatter, summary length, links), writes them, and commits as `librarian (<model>)`. Proposals that fail the checks are reported, not written.
+
+### Scheduled `tend`
+
+`reg-wiki ai schedule daily|weekly|off [--at HH:MM]` keeps one entry in the user's crontab (cron is on both Linux and macOS): a marker comment, then `reg-wiki --all ai tend`, run with the PATH and `REG_HOME` in effect when it was scheduled (cron's own PATH wouldn't find `npx`) and appending to `$REG_HOME/tend.log`. Nothing else in the crontab is touched, and a `crontab -l` that fails for any reason except "no crontab" stops the command, so a failed read can't wipe the person's jobs. Without an argument it shows the schedule. A pass with nothing to tend never starts the librarian.
 
 ### ACP details
 
@@ -217,7 +229,7 @@ Crates: `clap`, `serde`, `serde_json`, `serde_yaml_ng`, `toml`, `rusqlite` (bund
 3. **Agents:** skill, hooks, `install`/`uninstall` for Claude Code, then try it on real projects.
 4. **View:** HTML graph.
 5. **Librarian:** ACP client, `ai query` with fallback, then `ai record` and `ai tend`, and model selection during install.
-6. **More:** codex, cursor and gemini targets, `serve --mcp`, scheduled `tend`.
+6. **More:** codex, cursor and gemini targets, `serve --mcp`, scheduled `tend` (`reg-wiki ai schedule`).
 
 ## Out of scope for v1
 

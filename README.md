@@ -12,7 +12,10 @@ curl -fsSL https://raw.githubusercontent.com/HuxleyMc/reg-wiki/main/install.sh |
 ```
 
 This installs `reg-wiki` to `~/.local/bin`, checking the SHA-256 of the download.
-Then run `reg-wiki install` to wire it into your agents.
+Then run `reg-wiki install` to wire it into Claude Code, or
+`reg-wiki install --target codex,cursor,gemini` for other agents, which reach the wiki
+through its MCP server (`reg-wiki serve --mcp`). `reg-wiki ai schedule weekly` has the
+librarian tend the wiki on a schedule.
 
 **Update:** run the same command again. It does nothing if you're already on the latest release.
 

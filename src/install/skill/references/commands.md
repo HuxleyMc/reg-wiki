@@ -66,6 +66,7 @@ An optional agent (set up by `reg-wiki install`, configured under `[librarian]` 
 | `reg-wiki ai record [--dry-run]` | Rough notes on stdin; the librarian turns them into page edits. Each edit is checked like `write` (frontmatter, summary, links) and those that pass are committed together as `librarian (<model>)`; the rest are reported. It can only change pages it was shown in full. |
 | `reg-wiki ai tend [--limit 5] [--dry-run]` | Sends what `lint` finds that needs judgment (broken links, orphans, weak summaries, long pages, likely duplicates) with the pages involved, and applies the fixes the same way. May delete a page it merged into another, only if nothing still links to it. |
 | `reg-wiki ai models` | The models the librarian's agent offers (`*` marks the one in use). |
+| `reg-wiki ai schedule [daily\|weekly\|off] [--at HH:MM]` | Runs `reg-wiki --all ai tend` from the person's crontab (default 03:17; weekly is Sundays), logging to `tend.log` in `$REG_HOME`. Without an argument, shows the schedule. For people; agents rarely need it. |
 
 ```sh
 reg-wiki ai record <<'EOF'
@@ -87,8 +88,10 @@ EOF
 | Command | Does |
 |---|---|
 | `reg-wiki install [--target claude] [--yes] [--no-permissions] [--stop-hook] [--librarian-model M] [--librarian-agent A] [--no-librarian]` | Writes this skill, adds the hooks and `Bash(reg-wiki:*)` to `~/.claude/settings.json`, adds a section to `~/.claude/CLAUDE.md`, and sets up the librarian in `config.toml` (asked interactively, with the models the agent offers; `--yes` uses the defaults without starting it). Safe to run again. `--print-config claude` prints the Claude Code part instead. |
-| `reg-wiki uninstall` | Removes exactly what install added. |
-| `reg-wiki hook <event>` | Run by Claude Code's hooks; not for direct use. |
+| `reg-wiki install --target codex,cursor,gemini` | Other agents reach the wiki through the MCP server: Codex gets it in `~/.codex/config.toml` and a section in `~/.codex/AGENTS.md`; Cursor in `~/.cursor/mcp.json`; Gemini CLI in `~/.gemini/settings.json` (trusted unless `--no-permissions`), with hooks and a section in `~/.gemini/GEMINI.md`. `--print-config <target>` prints one target's part. |
+| `reg-wiki uninstall [--target T]` | Removes exactly what install added (every agent without `--target`). |
+| `reg-wiki serve --mcp` | The wiki as an MCP server on stdio: tools `wiki_context`, `wiki_query`, `wiki_list`, `wiki_read`, `wiki_links`, `wiki_write`, `wiki_new`, `wiki_lint`, `wiki_ask` and `wiki_record`, each running the matching command. Started by the agent, not by hand. |
+| `reg-wiki hook <event>` | Run by Claude Code's and Gemini CLI's hooks; not for direct use. |
 
 ## Files
 

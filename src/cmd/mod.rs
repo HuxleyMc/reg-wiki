@@ -9,6 +9,7 @@ mod new;
 mod project;
 mod query;
 mod read;
+mod schedule;
 mod stats;
 mod status;
 mod sync;
@@ -34,6 +35,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Command::Hook { event } => return Ok(crate::hooks::run(&cli, event)),
         Command::Install(a) => return crate::install::install(&cli, a),
         Command::Uninstall(a) => return crate::install::uninstall(&cli, a),
+        Command::Serve { .. } => return crate::serve::run(&cli),
         _ => {}
     }
     let cwd = std::env::current_dir()?;
@@ -71,6 +73,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             AiCmd::Record { dry_run } => ai::record(&mut ctx, dry_run),
             AiCmd::Tend { limit, dry_run } => ai::tend(&mut ctx, limit, dry_run),
             AiCmd::Models => ai::models(&ctx),
+            AiCmd::Schedule { when, at } => schedule::run(&ctx, when.as_deref(), at.as_deref()),
         },
         Command::Project { cmd } => match cmd {
             ProjectCmd::Add { name } => project::add(&mut ctx, name.as_deref()),
@@ -92,7 +95,10 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Command::View { out, no_open } => view::run(&ctx, out, no_open),
         Command::Sync => sync::sync(&ctx),
         Command::Reindex => sync::reindex(&mut ctx),
-        Command::Hook { .. } | Command::Install(_) | Command::Uninstall(_) => unreachable!(),
+        Command::Hook { .. }
+        | Command::Install(_)
+        | Command::Uninstall(_)
+        | Command::Serve { .. } => unreachable!(),
     }
 }
 
@@ -161,6 +167,7 @@ impl Ctx {
             self.agent_flag
                 .clone()
                 .or_else(|| std::env::var_os("CLAUDECODE").map(|_| "claude".to_string()))
+                .or_else(|| std::env::var_os("GEMINI_CLI").map(|_| "gemini".to_string()))
                 .or_else(git::user_name)
                 .unwrap_or_else(|| "user".to_string())
         })

@@ -1,4 +1,4 @@
-//! PostToolUse on Edit/Write: if the edited file is one of a page's `sources`, remind
+//! PostToolUse on Edit/Write (AfterTool on write_file/replace in Gemini CLI): if the edited file is one of a page's `sources`, remind
 //! the agent to update that page (once per page per session). Also notes the edit, for
 //! the Stop hook.
 
@@ -11,7 +11,15 @@ use super::{Input, Output, state};
 use crate::cmd::Ctx;
 use crate::{project, util};
 
-const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+/// Claude Code's file-editing tools, then Gemini CLI's.
+const EDIT_TOOLS: &[&str] = &[
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "write_file",
+    "replace",
+];
 
 pub fn run(ctx: &Ctx, input: &Input) -> Result<Option<Output>> {
     let tool = input.tool_name.as_deref().unwrap_or("");

@@ -9,15 +9,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::shared::{self, HookSpec, hook_exe, read_opt, remove_section, upsert_section};
 use super::{Change, Plan, SKILL_FILES, tilde};
 use crate::InstallArgs;
 
 pub const PERMISSION: &str = "Bash(reg-wiki:*)";
 /// The same rule in Claude Code's newer spelling; either counts as already allowed.
 const PERMISSION_ALT: &str = "Bash(reg-wiki *)";
-
-const START: &str = "<!-- reg-wiki:start -->";
-const END: &str = "<!-- reg-wiki:end -->";
 
 const CLAUDE_MD_SECTION: &str = "\
 <!-- reg-wiki:start -->
@@ -65,185 +63,58 @@ fn paths() -> Result<Paths> {
     })
 }
 
-/// (event, matcher, `reg-wiki hook` argument)
-const HOOKS: &[(&str, Option<&str>, &str)] = &[
+const HOOKS: &[HookSpec] = &[
     // Not on resume or fork: the context already has the index.
-    (
-        "SessionStart",
-        Some("startup|clear|compact"),
-        "session-start",
-    ),
-    ("UserPromptSubmit", None, "user-prompt-submit"),
-    (
-        "PostToolUse",
-        Some("Edit|Write|MultiEdit|NotebookEdit"),
-        "post-tool-use",
-    ),
-    ("Stop", None, "stop"),
+    HookSpec {
+        event: "SessionStart",
+        matcher: Some("startup|clear|compact"),
+        arg: "session-start",
+    },
+    HookSpec {
+        event: "UserPromptSubmit",
+        matcher: None,
+        arg: "user-prompt-submit",
+    },
+    HookSpec {
+        event: "PostToolUse",
+        matcher: Some("Edit|Write|MultiEdit|NotebookEdit"),
+        arg: "post-tool-use",
+    },
+    HookSpec {
+        event: "Stop",
+        matcher: None,
+        arg: "stop",
+    },
 ];
 
 /// Seconds Claude Code waits for a hook. They take milliseconds; this only bounds a hang.
 const HOOK_TIMEOUT: u64 = 10;
 
-fn hook_groups(exe: &str, stop: bool) -> Vec<(&'static str, Value)> {
-    HOOKS
-        .iter()
-        .filter(|(ev, _, _)| stop || *ev != "Stop")
-        .map(|(ev, matcher, arg)| {
-            let mut g = Map::new();
-            if let Some(m) = matcher {
-                g.insert("matcher".into(), json!(m));
-            }
-            g.insert(
-                "hooks".into(),
-                json!([{ "type": "command", "command": format!("{exe} hook {arg}"), "timeout": HOOK_TIMEOUT }]),
-            );
-            (*ev, Value::Object(g))
-        })
-        .collect()
-}
-
-/// Is this hook command one of ours (`reg-wiki hook …`, possibly by absolute path)?
-fn is_ours(cmd: &str) -> bool {
-    let c = cmd.trim();
-    let Some(i) = c.find(" hook ") else {
-        return false;
-    };
-    let exe = c[..i].trim().trim_matches(['\'', '"']);
-    exe == "reg-wiki" || exe.ends_with("/reg-wiki")
-}
-
-/// How hooks should call reg-wiki: by name if it's on PATH, else by absolute path.
-fn hook_exe() -> (String, Option<String>) {
-    if on_path("reg-wiki") {
-        return ("reg-wiki".into(), None);
-    }
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.canonicalize().ok())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "reg-wiki".into());
-    let quoted = if exe.contains(|c: char| !(c.is_alphanumeric() || "/._-+".contains(c))) {
-        format!("'{}'", exe.replace('\'', r"'\''"))
-    } else {
-        exe.clone()
-    };
-    let note = format!(
-        "reg-wiki isn't on PATH, so the hooks call {exe}. The agent runs `reg-wiki …` \
-         commands by name, so put it on PATH (e.g. `cargo install --path .`) and run \
-         install again."
-    );
-    (quoted, Some(note))
-}
-
-fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| {
-        std::env::split_paths(&p).any(|d| {
-            let f = d.join(name);
-            f.is_file()
-                && fs::metadata(&f).is_ok_and(|m| {
-                    use std::os::unix::fs::PermissionsExt;
-                    m.permissions().mode() & 0o111 != 0
-                })
-        })
-    })
-}
-
-fn read_opt(p: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(p) {
-        Ok(t) => Ok(Some(t)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", p.display())),
-    }
-}
-
 fn parse_settings(p: &Path, text: Option<&str>) -> Result<Value> {
-    let Some(text) = text.filter(|t| !t.trim().is_empty()) else {
-        return Ok(Value::Object(Map::new()));
-    };
-    let v: Value = serde_json::from_str(text).with_context(|| {
-        format!(
-            "{} isn't valid JSON; fix it (or use --print-config claude and edit by hand)",
-            p.display()
-        )
-    })?;
-    if !v.is_object() {
-        bail!("{} should contain a JSON object", p.display());
-    }
-    Ok(v)
+    shared::parse_json(p, text, "claude")
 }
 
 fn render_settings(v: &Value) -> String {
-    let mut s = serde_json::to_string_pretty(v).unwrap_or_default();
-    s.push('\n');
-    s
+    shared::render_json(v)
+}
+
+fn add_hooks(settings: &mut Value, exe: &str, stop: bool) -> Result<()> {
+    let specs: Vec<HookSpec> = HOOKS
+        .iter()
+        .filter(|h| stop || h.event != "Stop")
+        .copied()
+        .collect();
+    shared::add_hooks(settings, &specs, exe, HOOK_TIMEOUT)
+}
+
+/// Returns whether a Stop hook of ours was there.
+fn remove_hooks(settings: &mut Value) -> bool {
+    shared::remove_hooks(settings).iter().any(|e| e == "Stop")
 }
 
 fn load_manifest(p: &Path) -> Option<Manifest> {
     let text = fs::read_to_string(p.join(MANIFEST)).ok()?;
     serde_json::from_str(&text).ok()
-}
-
-/// Remove our hook handlers, and the groups, events and `hooks` key left empty by that.
-/// Returns whether a Stop hook of ours was there.
-fn remove_hooks(settings: &mut Value) -> bool {
-    let mut had_stop = false;
-    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
-        return false;
-    };
-    let mut emptied_events = Vec::new();
-    for (event, groups) in hooks.iter_mut() {
-        let Some(groups) = groups.as_array_mut() else {
-            continue;
-        };
-        let before = groups.len();
-        groups.retain_mut(|g| {
-            let Some(handlers) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
-                return true;
-            };
-            let n = handlers.len();
-            handlers.retain(|h| {
-                let ours = h
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_ours);
-                if ours && event == "Stop" {
-                    had_stop = true;
-                }
-                !ours
-            });
-            // Drop only groups we emptied.
-            !(handlers.is_empty() && n > 0)
-        });
-        if groups.is_empty() && before > 0 {
-            emptied_events.push(event.clone());
-        }
-    }
-    for e in emptied_events {
-        hooks.remove(&e);
-    }
-    if hooks.is_empty() {
-        settings.as_object_mut().map(|o| o.remove("hooks"));
-    }
-    had_stop
-}
-
-fn add_hooks(settings: &mut Value, exe: &str, stop: bool) -> Result<()> {
-    let obj = settings
-        .as_object_mut()
-        .context("settings must be an object")?;
-    let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
-    let Some(hooks) = hooks.as_object_mut() else {
-        bail!("`hooks` in settings.json should be an object");
-    };
-    for (event, group) in hook_groups(exe, stop) {
-        let groups = hooks.entry(event).or_insert_with(|| json!([]));
-        let Some(groups) = groups.as_array_mut() else {
-            bail!("`hooks.{event}` in settings.json should be an array");
-        };
-        groups.push(group);
-    }
-    Ok(())
 }
 
 fn allow_list(settings: &mut Value) -> Result<&mut Vec<Value>> {
@@ -294,49 +165,6 @@ fn remove_permission(settings: &mut Value) {
     if perms.is_empty() {
         settings.as_object_mut().map(|o| o.remove("permissions"));
     }
-}
-
-/// Put the fenced section in `text`, replacing an existing one.
-fn upsert_section(text: &str) -> String {
-    if let Some((a, b)) = section_range(text) {
-        let mut s = text[..a].to_string();
-        s.push_str(CLAUDE_MD_SECTION);
-        s.push_str(&text[b..]);
-        return s;
-    }
-    let mut s = text.to_string();
-    if !s.is_empty() {
-        if !s.ends_with('\n') {
-            s.push('\n');
-        }
-        s.push('\n');
-    }
-    s.push_str(CLAUDE_MD_SECTION);
-    s
-}
-
-fn remove_section(text: &str) -> String {
-    let Some((a, b)) = section_range(text) else {
-        return text.to_string();
-    };
-    let mut before = text[..a].to_string();
-    let after = &text[b..];
-    // Undo the blank line install put in front of the section.
-    if after.is_empty() && before.ends_with("\n\n") {
-        before.pop();
-    }
-    before + after
-}
-
-/// Byte range of the section, including the newline after the end marker.
-fn section_range(text: &str) -> Option<(usize, usize)> {
-    let a = text.find(START)?;
-    let e = a + text[a..].find(END)?;
-    let mut b = e + END.len();
-    if text[b..].starts_with('\n') {
-        b += 1;
-    }
-    Some((a, b))
 }
 
 pub fn plan_install(a: &InstallArgs) -> Result<Plan> {
@@ -393,7 +221,7 @@ pub fn plan_install(a: &InstallArgs) -> Result<Plan> {
     }
 
     let md = read_opt(&p.claude_md)?;
-    let new_md = upsert_section(md.as_deref().unwrap_or(""));
+    let new_md = upsert_section(md.as_deref().unwrap_or(""), CLAUDE_MD_SECTION);
     if md.as_deref() != Some(new_md.as_str()) {
         changes.push(Change {
             path: p.claude_md.clone(),
@@ -538,31 +366,6 @@ pub fn print_config(json: bool, a: &InstallArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn recognises_our_hooks() {
-        assert!(is_ours("reg-wiki hook session-start"));
-        assert!(is_ours("/home/me/.cargo/bin/reg-wiki hook stop"));
-        assert!(is_ours("'/opt/my tools/reg-wiki' hook stop"));
-        assert!(!is_ours("other-tool hook stop"));
-        assert!(!is_ours("reg-wiki list"));
-    }
-
-    #[test]
-    fn section_round_trips() {
-        for orig in ["", "# Mine\n", "# Mine\n\nmore\n"] {
-            let with = upsert_section(orig);
-            assert!(with.contains(START));
-            assert_eq!(upsert_section(&with), with, "idempotent");
-            assert_eq!(remove_section(&with), orig);
-        }
-        // A section in the middle is replaced in place.
-        let mid = format!("a\n\n{START}\nold\n{END}\n\nb\n");
-        let new = upsert_section(&mid);
-        assert!(new.starts_with("a\n\n<!-- reg-wiki:start -->"));
-        assert!(new.ends_with("<!-- reg-wiki:end -->\n\nb\n"));
-        assert_eq!(remove_section(&new), "a\n\n\nb\n");
-    }
 
     #[test]
     fn hooks_merge_and_unmerge() {

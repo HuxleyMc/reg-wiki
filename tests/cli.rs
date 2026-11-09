@@ -47,7 +47,9 @@ impl Env {
             .env_remove("REG_SESSION")
             .env_remove("REG_LIBRARIAN")
             .env_remove("CLAUDE_ENV_FILE")
-            .env_remove("CLAUDE_CONFIG_DIR");
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env_remove("GEMINI_CLI");
         c
     }
 
@@ -1600,7 +1602,7 @@ fn install_refuses_bad_settings_and_asks_before_writing() {
         .failure()
         .stderr(predicate::str::contains("--yes"));
     assert!(!c.path("settings.json").exists());
-    c.run(&["install", "--yes", "--target", "codex"])
+    c.run(&["install", "--yes", "--target", "vscode"])
         .failure()
         .stderr(predicate::str::contains("unknown target"));
 }
@@ -2310,4 +2312,450 @@ fn install_sets_up_the_librarian_without_starting_it() {
     c.run(&["install", "--yes", "--no-librarian"]).success();
     let cfg = fs::read_to_string(c.env.home.join("config.toml")).unwrap();
     assert!(cfg.contains("enabled = false") && cfg.contains("claude-sonnet-5-5"));
+}
+
+// ---- other targets: codex, cursor, gemini ----
+
+/// Every file under the user's home except ~/.claude, for before/after comparisons.
+fn agent_files(c: &Claude) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for dir in [".codex", ".cursor", ".gemini"] {
+        let mut stack = vec![c.home.join(dir)];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&d) else { continue };
+            for e in rd {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    out.push((p.display().to_string(), "<dir>".into()));
+                    stack.push(p);
+                } else {
+                    out.push((p.display().to_string(), fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn install_codex_cursor_gemini_and_uninstall_restores_them() {
+    let c = Claude::new();
+    let h = &c.home;
+    for d in [".codex", ".cursor", ".gemini"] {
+        fs::create_dir_all(h.join(d)).unwrap();
+    }
+    let codex_cfg = "model = \"o4\"\n\n[mcp_servers.other]\ncommand = \"other\"\n";
+    fs::write(h.join(".codex/config.toml"), codex_cfg).unwrap();
+    fs::write(h.join(".codex/AGENTS.md"), "# Mine\n").unwrap();
+    let gemini = r#"{
+  "theme": "dark",
+  "hooks": {
+    "enabled": true,
+    "AfterTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mine"
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+    fs::write(h.join(".gemini/settings.json"), gemini).unwrap();
+    let before = agent_files(&c);
+
+    c.run(&[
+        "install",
+        "--yes",
+        "--no-librarian",
+        "--target",
+        "codex,cursor,gemini",
+    ])
+    .success();
+    assert!(!c.path("settings.json").exists(), "claude not touched");
+
+    let cfg = fs::read_to_string(h.join(".codex/config.toml")).unwrap();
+    assert!(cfg.starts_with(codex_cfg), "{cfg}");
+    assert!(cfg.contains("[mcp_servers.reg-wiki]"), "{cfg}");
+    assert!(cfg.contains("args = [\"serve\", \"--mcp\"]"), "{cfg}");
+    let md = fs::read_to_string(h.join(".codex/AGENTS.md")).unwrap();
+    assert!(md.starts_with("# Mine\n\n<!-- reg-wiki:start -->") && md.contains("wiki_context"));
+
+    let cur: Value =
+        serde_json::from_str(&fs::read_to_string(h.join(".cursor/mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        cur["mcpServers"]["reg-wiki"]["args"],
+        serde_json::json!(["serve", "--mcp"])
+    );
+    assert!(
+        cur["mcpServers"]["reg-wiki"]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("/reg-wiki")
+    );
+
+    let gem: Value =
+        serde_json::from_str(&fs::read_to_string(h.join(".gemini/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(gem["theme"], "dark");
+    assert_eq!(gem["mcpServers"]["reg-wiki"]["trust"], true);
+    assert_eq!(gem["hooks"]["enabled"], true);
+    assert_eq!(gem["hooks"]["AfterTool"].as_array().unwrap().len(), 2);
+    assert!(
+        gem["hooks"]["BeforeAgent"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("hook before-agent")
+    );
+    assert!(h.join(".gemini/GEMINI.md").is_file());
+
+    // Idempotent.
+    let installed = agent_files(&c);
+    c.run(&[
+        "install",
+        "--yes",
+        "--no-librarian",
+        "--target",
+        "codex,cursor,gemini",
+    ])
+    .success()
+    .stdout(predicate::str::contains("already installed"));
+    assert_eq!(agent_files(&c), installed);
+
+    // --no-permissions takes back the trust install gave.
+    c.run(&[
+        "install",
+        "--yes",
+        "--no-librarian",
+        "--no-permissions",
+        "--target",
+        "gemini",
+    ])
+    .success();
+    let gem: Value =
+        serde_json::from_str(&fs::read_to_string(h.join(".gemini/settings.json")).unwrap())
+            .unwrap();
+    assert!(gem["mcpServers"]["reg-wiki"].get("trust").is_none());
+
+    // Uninstall without --target covers every agent and puts every file back.
+    c.run(&["uninstall", "--yes"]).success();
+    assert_eq!(agent_files(&c), before);
+    assert!(!c.env.home.join("installs").exists());
+    c.run(&["uninstall", "--yes"])
+        .success()
+        .stdout(predicate::str::contains("not installed"));
+}
+
+#[test]
+fn codex_home_and_print_config() {
+    let c = Claude::new();
+    let dir = c.home.join("cx");
+    c.cmd()
+        .env("CODEX_HOME", &dir)
+        .args(["install", "--yes", "--no-librarian", "--target", "codex"])
+        .assert()
+        .success();
+    assert!(dir.join("config.toml").is_file());
+    assert!(!c.home.join(".codex").exists());
+    for (t, want) in [
+        ("codex", "[mcp_servers.reg-wiki]"),
+        ("cursor", "\"mcpServers\""),
+        ("gemini", "\"BeforeAgent\""),
+    ] {
+        let out = c
+            .cmd()
+            .args(["install", "--print-config", t])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains(want), "{t}: {text}");
+    }
+    assert!(!c.home.join(".cursor").exists(), "printing writes nothing");
+}
+
+#[test]
+fn gemini_hooks_answer_with_gemini_event_names() {
+    let env = seeded();
+    let out = env
+        .cmd()
+        .args(["hook", "before-agent"])
+        .write_stdin(
+            env.input(serde_json::json!({ "hook_event_name": "BeforeAgent", "prompt": "how do stripe webhooks retry" }))
+                .to_string(),
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "BeforeAgent");
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("billing/stripe")
+    );
+}
+
+// ---- serve --mcp ----
+
+struct Mcp {
+    child: std::process::Child,
+    out: std::io::BufReader<std::process::ChildStdout>,
+    next: i64,
+}
+
+impl Mcp {
+    fn start(env: &Env, dir: &Path) -> Mcp {
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("reg-wiki"))
+            .current_dir(dir)
+            .env("REG_HOME", &env.home)
+            .env_remove("REG_AGENT")
+            .env_remove("REG_LIBRARIAN")
+            .env_remove("CLAUDECODE")
+            .args(["serve", "--mcp"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        Mcp {
+            child,
+            out,
+            next: 1,
+        }
+    }
+
+    fn send(&mut self, v: Value) {
+        use std::io::Write;
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{v}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn recv(&mut self) -> Value {
+        use std::io::BufRead;
+        let mut line = String::new();
+        self.out.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"))
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+        );
+        let v = self.recv();
+        assert_eq!(v["id"], id, "{v}");
+        v
+    }
+
+    /// (text, isError) of a tool call.
+    fn call(&mut self, name: &str, args: Value) -> (String, bool) {
+        let v = self.request(
+            "tools/call",
+            serde_json::json!({ "name": name, "arguments": args }),
+        );
+        let r = &v["result"];
+        (
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            r["isError"].as_bool().unwrap(),
+        )
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn mcp_server_reads_and_writes_the_wiki() {
+    let env = seeded();
+    // Started outside the project: the client's root says where it is.
+    let mut m = Mcp::start(&env, env.home.parent().unwrap());
+    let init = m.request(
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "roots": { "listChanged": true } },
+            "clientInfo": { "name": "codex-mcp-client", "version": "1" }
+        }),
+    );
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(init["result"]["serverInfo"]["name"], "reg-wiki");
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("wiki_context")
+    );
+
+    m.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    let roots = m.recv();
+    assert_eq!(roots["method"], "roots/list");
+    let uri = format!("file://{}", env.repo.display()).replace(' ', "%20");
+    m.send(serde_json::json!({ "jsonrpc": "2.0", "id": roots["id"], "result": { "roots": [ { "uri": uri } ] } }));
+
+    let tools = m.request("tools/list", serde_json::json!({}));
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for want in [
+        "wiki_context",
+        "wiki_query",
+        "wiki_read",
+        "wiki_write",
+        "wiki_new",
+        "wiki_record",
+    ] {
+        assert!(names.contains(&want), "{want} in {names:?}");
+    }
+
+    let (text, err) = m.call(
+        "wiki_context",
+        serde_json::json!({ "question": "stripe webhook retries" }),
+    );
+    assert!(!err && text.contains("myapp/billing/stripe"), "{text}");
+    let (text, err) = m.call("wiki_query", serde_json::json!({ "search": "sessions" }));
+    assert!(!err && text.contains("myapp/auth"), "{text}");
+
+    let (text, err) = m.call("wiki_read", serde_json::json!({ "slug": "billing" }));
+    assert!(!err, "{text}");
+    let hash = text
+        .lines()
+        .find_map(|l| l.split("hash ").nth(1).or_else(|| l.split("hash: ").nth(1)))
+        .map(|h| h.split_whitespace().next().unwrap().to_string())
+        .unwrap_or_else(|| panic!("no hash in {text}"));
+
+    let page = fm(
+        "Billing",
+        "How subscriptions, invoices and Stripe webhooks fit together.",
+        "",
+        "# Billing\n\nRetries are capped at 3.",
+    );
+    let (text, err) = m.call(
+        "wiki_write",
+        serde_json::json!({ "slug": "billing", "content": page, "message": "Record the retry cap", "base": hash }),
+    );
+    assert!(!err, "{text}");
+    let log = Std::new("git")
+        .current_dir(env.wiki())
+        .args(["log", "-1", "--format=%an|%s"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&log.stdout).trim(),
+        "codex|myapp/billing: Record the retry cap"
+    );
+
+    // The old hash is now stale: a conflict, with the current page to merge into.
+    let (text, err) = m.call(
+        "wiki_write",
+        serde_json::json!({ "slug": "billing", "content": "x", "message": "again", "base": hash }),
+    );
+    assert!(
+        err && text.starts_with("conflict") && text.contains("Retries are capped at 3."),
+        "{text}"
+    );
+
+    // Bad calls are tool errors or protocol errors, never a dead server.
+    let (text, err) = m.call("wiki_read", serde_json::json!({ "slug": "nope" }));
+    assert!(err && text.contains("no page"), "{text}");
+    let v = m.request(
+        "tools/call",
+        serde_json::json!({ "name": "wiki_read", "arguments": {} }),
+    );
+    assert!(v["error"]["message"].as_str().unwrap().contains("slug"));
+    let v = m.request("nope/nope", serde_json::json!({}));
+    assert_eq!(v["error"]["code"], -32601);
+    let v = m.request("ping", serde_json::json!({}));
+    assert_eq!(v["result"], serde_json::json!({}));
+}
+
+#[test]
+fn mcp_server_offers_nothing_inside_the_librarian() {
+    let env = seeded();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("reg-wiki"))
+        .current_dir(&env.repo)
+        .env("REG_HOME", &env.home)
+        .env("REG_LIBRARIAN", "1")
+        .args(["serve", "--mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list"}}"#).unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["result"]["tools"], serde_json::json!([]));
+}
+
+// ---- ai schedule ----
+
+#[test]
+fn schedule_adds_and_removes_one_crontab_entry() {
+    let env = Env::new();
+    let dir = env.home.parent().unwrap().to_path_buf();
+    let tab = dir.join("crontab.txt");
+    let fake = dir.join("fake-crontab");
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nT='{}'\nif [ \"$1\" = -l ]; then\n  [ -f \"$T\" ] || {{ echo 'no crontab for me' >&2; exit 1; }}\n  cat \"$T\"\nelse\n  cat > \"$T\"\nfi\n",
+            tab.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |args: &[&str]| {
+        let mut c = env.cmd();
+        c.env("REG_CRONTAB", &fake).args(args);
+        c.assert()
+    };
+
+    run(&["ai", "schedule"])
+        .success()
+        .stdout(predicate::str::contains("no scheduled tend"));
+    run(&["ai", "schedule", "daily"]).success();
+    let t = fs::read_to_string(&tab).unwrap();
+    assert!(t.contains("17 3 * * * PATH="), "{t}");
+    assert!(
+        t.contains("--all ai tend >>") && t.contains("tend.log"),
+        "{t}"
+    );
+
+    // Other jobs are kept; changing the schedule replaces the entry.
+    fs::write(&tab, format!("0 * * * * backup\n{t}")).unwrap();
+    run(&["ai", "schedule", "weekly", "--at", "22:05"]).success();
+    let t = fs::read_to_string(&tab).unwrap();
+    assert!(t.starts_with("0 * * * * backup\n"), "{t}");
+    assert_eq!(t.matches("ai tend").count(), 1, "{t}");
+    assert!(t.contains("5 22 * * 0 "), "{t}");
+    run(&["ai", "schedule"])
+        .success()
+        .stdout(predicate::str::contains("weekly, Sundays at 22:05"));
+
+    run(&["ai", "schedule", "off"]).success();
+    assert_eq!(fs::read_to_string(&tab).unwrap(), "0 * * * * backup\n");
+    run(&["ai", "schedule", "daily", "--at", "25:00"]).failure();
 }

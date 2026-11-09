@@ -1,4 +1,4 @@
-//! `reg-wiki hook <event>`: Claude Code hooks. Each reads the hook's JSON on stdin and
+//! `reg-wiki hook <event>`: Claude Code and Gemini CLI hooks. Each reads the hook's JSON on stdin and
 //! prints JSON that adds context for the agent, or nothing.
 //!
 //! A hook must never get in the agent's way: it always exits 0 (exit code 2 would block
@@ -60,17 +60,27 @@ enum Event {
 
 impl Event {
     /// Accepts `session-start`, `SessionStart`, `session_start`, …
+    #[cfg(test)]
     fn parse(s: &str) -> Option<Event> {
+        Self::parse_named(s).map(|(e, _)| e)
+    }
+
+    /// The event, and the name to answer with: Gemini CLI's `BeforeAgent` and
+    /// `AfterTool` are our UserPromptSubmit and PostToolUse, and its reply has to carry
+    /// its own event name.
+    fn parse_named(s: &str) -> Option<(Event, &'static str)> {
         let norm: String = s
             .chars()
             .filter(|c| c.is_alphanumeric())
             .map(|c| c.to_ascii_lowercase())
             .collect();
         Some(match norm.as_str() {
-            "sessionstart" => Event::SessionStart,
-            "userpromptsubmit" | "prompt" => Event::UserPromptSubmit,
-            "posttooluse" => Event::PostToolUse,
-            "stop" => Event::Stop,
+            "sessionstart" => (Event::SessionStart, "SessionStart"),
+            "userpromptsubmit" | "prompt" => (Event::UserPromptSubmit, "UserPromptSubmit"),
+            "beforeagent" => (Event::UserPromptSubmit, "BeforeAgent"),
+            "posttooluse" => (Event::PostToolUse, "PostToolUse"),
+            "aftertool" => (Event::PostToolUse, "AfterTool"),
+            "stop" => (Event::Stop, "Stop"),
             _ => return None,
         })
     }
@@ -92,15 +102,16 @@ pub fn run(cli: &Cli, event: &str) -> ExitCode {
     if std::env::var("REG_LIBRARIAN").is_ok_and(|v| v == "1") {
         return ExitCode::SUCCESS;
     }
-    let Some(ev) = Event::parse(event) else {
+    let Some((ev, reply_name)) = Event::parse_named(event) else {
         eprintln!(
             "reg-wiki: unknown hook event `{event}` (expected session-start, \
-             user-prompt-submit, post-tool-use or stop)"
+             user-prompt-submit, post-tool-use or stop; or Gemini CLI's before-agent, \
+             after-tool)"
         );
         return ExitCode::SUCCESS;
     };
     match catch_unwind(AssertUnwindSafe(|| handle(cli, ev))) {
-        Ok(Ok(Some(out))) => println!("{}", render(ev, out)),
+        Ok(Ok(Some(out))) => println!("{}", render(reply_name, out)),
         Ok(Ok(None)) => {}
         Ok(Err(e)) => eprintln!("reg-wiki: {} hook: {e:#}", ev.name()),
         Err(_) => eprintln!("reg-wiki: {} hook panicked", ev.name()),
@@ -108,11 +119,11 @@ pub fn run(cli: &Cli, event: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn render(ev: Event, out: Output) -> String {
+fn render(event_name: &str, out: Output) -> String {
     let v = match out {
         Output::Context(text) => json!({
             "hookSpecificOutput": {
-                "hookEventName": ev.name(),
+                "hookEventName": event_name,
                 "additionalContext": clip(&text, MAX_OUTPUT),
             }
         }),
@@ -181,6 +192,14 @@ mod tests {
         assert_eq!(Event::parse("PostToolUse"), Some(Event::PostToolUse));
         assert_eq!(Event::parse("stop"), Some(Event::Stop));
         assert_eq!(Event::parse("PreToolUse"), None);
+        assert_eq!(
+            Event::parse_named("before-agent"),
+            Some((Event::UserPromptSubmit, "BeforeAgent"))
+        );
+        assert_eq!(
+            Event::parse_named("AfterTool"),
+            Some((Event::PostToolUse, "AfterTool"))
+        );
     }
 
     #[test]
