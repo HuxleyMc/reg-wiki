@@ -1,6 +1,6 @@
 ---
 name: reg-wiki
-description: Read and write the reg-wiki, a shared wiki of linked Markdown pages that records how projects work, through the `reg-wiki` CLI. Use it before working on a part of a codebase (to learn what is already known about it), and after learning something a later session would want (a decision and its reason, a gotcha, how parts fit together), to record it.
+description: Read and write the reg-wiki, a shared wiki of linked Markdown pages that records how projects work, through the `reg-wiki` CLI. Use it when you need what earlier sessions learned (answering a question about how the code works, stuck on a problem that may have a recorded cause, picking up work across sessions or repositories), and when you learn something a later session would want (a decision and its reason, a gotcha, how parts fit together, notes on a feature in progress). Not a step to run on every task.
 ---
 
 # reg-wiki
@@ -9,15 +9,27 @@ The wiki is the memory that outlives this session. Pages are Markdown files with
 
 The current project is detected from the working directory (its git remote). Commands cover that project's pages plus shared ones (`_shared/…`). At session start you get a list of the project's pages, one `slug — summary` line each, and when a prompt matches a page, you're told about it.
 
-## The loop
+## When to look
 
-1. **Look before you work.** Before you change or explain a part of the code, check what the wiki knows:
-   - `reg-wiki context "how do webhooks get retried"`: the best-matching pages' bodies plus summaries of what they link to, in one call, within a token budget. Usually the best first step.
-   - `reg-wiki query stripe webhook`: ranked list of matches (slug, summary, snippet) when you want to choose.
-   - `reg-wiki read <slug>`: one page in full. The footer gives its `hash` (needed to write it), its refs, links and backlinks, each with a summary. Follow those only when a summary says you need them.
-   - `reg-wiki ai query "how do webhooks get retried"`: if a librarian is set up, it reads the matching pages and answers in a few lines with its sources, which costs you less context than `context` when the answer is spread over many pages. Without one, you get `query` results.
-2. **Do the work.** Trust the wiki, but if it disagrees with the code, the code wins, and the page needs fixing.
-3. **Write back what you learned**, before you finish: anything that took real effort to find out, or that you'd want to know next time. Update the closest existing page rather than adding a new one.
+The wiki is there when you need it, not a checklist item: don't search it before every task. A small, self-contained change you can understand from the code doesn't need it. Look when:
+
+- you're **answering a question** about how something works, why it is the way it is, or where something lives, and the answer isn't plain from the code in front of you;
+- you **hit a problem** (a confusing failure, a surprising behaviour, a flaky test): a past session may have recorded the cause;
+- you're **picking up earlier work**: a feature in progress, a follow-up, something a previous session left notes about;
+- the work **spans several repositories** or depends on how another project behaves;
+- a page in the session-start list or a "Relevant wiki pages" hint clearly covers what you're about to do.
+
+How to look, cheapest first:
+- `reg-wiki context "how do webhooks get retried"`: the best-matching pages' bodies plus summaries of what they link to, in one call, within a token budget.
+- `reg-wiki query stripe webhook`: ranked list of matches (slug, summary, snippet) when you want to choose.
+- `reg-wiki read <slug>`: one page in full. The footer gives its `hash` (needed to write it), its refs, links and backlinks, each with a summary. Follow those only when a summary says you need them.
+- `reg-wiki ai query "how do webhooks get retried"`: if a librarian is set up, it reads the matching pages and answers in a few lines with its sources, which costs you less context than `context` when the answer is spread over many pages. Without one, you get `query` results.
+
+Trust the wiki, but if it disagrees with the code, the code wins, and the page needs fixing.
+
+## How to write
+
+Prefer updating the closest existing page to adding a new one. What's worth recording is under [When to write](#when-to-write).
 
 ```sh
 reg-wiki read myapp/billing                  # note the hash in the footer
@@ -46,9 +58,11 @@ Write when you:
 - made or discovered a **decision and its reason** ("we cap retries at 3 because Stripe resends anyway");
 - hit a **gotcha** that cost time (an ordering constraint, a misleading name, a flaky test and its cause);
 - worked out **how a part of the system fits together** that no page explains yet;
+- are partway through **a larger feature** and want to keep track of what's decided, what's left and what to watch out for, so a later session (or another repository's) can pick it up;
+- learned how **projects depend on each other** (an API contract, a shared config, an order to deploy in);
 - found a page that is **wrong or stale**; fix it as soon as you notice.
 
-Don't write: a diary of what you did this session, copies of code, anything obvious from reading the file, or secrets.
+Nothing to record is a fine outcome: most sessions don't need a write. Don't write a diary of what you did this session, copies of code, anything obvious from reading the file, or secrets. Notes on work in progress are fine when they'd help whoever continues it; mark them as such and trim them once the work lands.
 
 When you're told an edited file is one of a page's `sources`, check whether the page still holds and update it if not.
 

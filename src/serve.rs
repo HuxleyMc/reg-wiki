@@ -31,12 +31,17 @@ reg-wiki is a wiki of linked Markdown pages that records how projects work: deci
 their reasons, gotchas, how parts fit together. It is the memory that outlives this session; \
 people review every write through git.
 
-The loop:
-1. Before working on a part of the code, ask what the wiki knows: wiki_context with a \
-question (best first step), or wiki_query to pick from ranked matches, then wiki_read for \
-one page in full. Follow refs and links only when their summary says you need them.
-2. Do the work. If the wiki disagrees with the code, the code wins and the page needs fixing.
-3. Before you finish, record what a later session would want to know: update the closest \
+When to use it: not on every task. A small change you can understand from the code doesn't \
+need it. Look when you need what earlier sessions learned: answering a question about how \
+or why something works, stuck on a problem that may have a recorded cause, picking up \
+earlier work, or working across repositories.
+
+1. To look: wiki_context with a question (cheapest), or wiki_query to pick from ranked \
+matches, then wiki_read for one page in full. Follow refs and links only when their summary \
+says you need them. If the wiki disagrees with the code, the code wins and the page needs \
+fixing.
+2. When you learn something a later session would want (a decision and its reason, a \
+gotcha, how parts fit together, notes on a larger feature in progress), record it: update the closest \
 page (wiki_read it, then wiki_write the whole page with base set to the hash from the read \
 and message saying why), or wiki_write a new slug with full frontmatter (title, summary, \
 tags, sources). Search before you add a page; updating beats a duplicate.
@@ -440,7 +445,7 @@ fn tools() -> Value {
     json!([
         tool(
             "wiki_context",
-            "What the wiki knows about a question: the best-matching pages' bodies plus summaries of the pages they link to, cut to a token budget. Usually the best first step before working on a part of the code.",
+            "What the wiki knows about a question: the best-matching pages' bodies plus summaries of the pages they link to, cut to a token budget. The cheapest way to find what earlier sessions recorded when you need it.",
             json!({
                 "question": { "type": "string" },
                 "budget": { "type": "string", "description": "Token budget, e.g. 4k or 1500." }

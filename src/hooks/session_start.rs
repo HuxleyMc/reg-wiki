@@ -87,10 +87,12 @@ pub fn index(ctx: &Ctx, budget: usize) -> Result<Option<String>> {
         Some(name) => {
             let mut s = format!(
                 "reg-wiki: the wiki has {} page(s) for project `{name}` and {} shared or \
-                 associated. Each line is `slug — when to read it`. Before working on \
-                 something a page covers, read it (`reg-wiki read <slug>`) or ask \
-                 `reg-wiki context \"<question>\"`. When you learn something worth keeping, \
-                 record it with `reg-wiki write` or `reg-wiki new` (see the reg-wiki skill).\n",
+                 associated. Each line is `slug — when to read it`. No need to read \
+                 any up front: open one (`reg-wiki read <slug>`) or ask \
+                 `reg-wiki context \"<question>\"` when you need it, e.g. to answer a \
+                 question, when stuck on a problem, or to pick up earlier work. When you \
+                 learn something worth keeping, record it with `reg-wiki write` or \
+                 `reg-wiki new` (see the reg-wiki skill).\n",
                 own.len(),
                 shared.len()
             );
